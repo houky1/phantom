@@ -1,0 +1,64 @@
+{
+	"files": [
+		{
+			"path": "src/main/eos.f90",
+			"bookmarks": [
+				{
+					"line": 933,
+					"column": 63,
+					"label": ""
+				}
+			]
+		},
+		{
+			"path": "src/main/force.F90",
+			"bookmarks": [
+				{
+					"line": 2989,
+					"column": 0,
+					"label": ""
+				},
+				{
+					"line": 3007,
+					"column": 0,
+					"label": ""
+				}
+			]
+		},
+		{
+			"path": "src/main/energies.f90",
+			"bookmarks": [
+				{
+					"line": 417,
+					"column": 0,
+					"label": ""
+				}
+			]
+		},
+		{
+			"path": "build/Makefile_setups",
+			"bookmarks": [
+				{
+					"line": 443,
+					"column": 26,
+					"label": ""
+				},
+				{
+					"line": 453,
+					"column": 28,
+					"label": ""
+				},
+				{
+					"line": 750,
+					"column": 23,
+					"label": ""
+				},
+				{
+					"line": 774,
+					"column": 21,
+					"label": ""
+				}
+			]
+		}
+	]
+}

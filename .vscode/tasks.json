@@ -1,0 +1,84 @@
+{
+  // See https://go.microsoft.com/fwlink/?LinkId=733558
+  // for the documentation about the tasks.json format
+  "version": "2.0.0",
+  "linux": {
+    "options": {
+      "env": {
+        "SYSTEM": "gfortran",
+        "OMP_SCHEDULE": "dynamic",
+        "OMP_STACKSIZE": "512M",
+      },
+    },
+  },
+  "osx": {
+    "options": {
+      "env": {
+        "SYSTEM": "gfortranOSX",
+        "OMP_SCHEDULE": "dynamic",
+        "OMP_STACKSIZE": "512M",
+      }
+    },
+  },
+  "command": "ulimit",
+  "args": [
+    "-s",
+    "unlimited"
+  ],
+  "tasks": [
+    {
+      "label": "build",
+      "type": "shell",
+      "command": "make",
+      "args": [
+        "-C",
+        "${workspaceFolder}/../phantom_test/binary_26.04.18/",
+        // "analysis"
+      ],
+      "osx": {
+        "args": [
+          "-C",
+          "${workspaceFolder}/../phantom/phantom_test/binary_26.04.18/",
+          "analysis"
+        ],
+      },
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "presentation": {
+        // Reveal the output only if unrecognized errors occur.
+        // "reveal": "silent"
+      },
+      // Use the standard MS compiler pattern to detect errors, warnings and infos
+      "problemMatcher": "$msCompile"
+    },
+    {
+      "label": "clean",
+      "type": "shell",
+      "command": "make",
+      "args": [
+        "-C",
+        "${workspaceFolder}/../phantom_test/binary_26.04.18/",
+        "clean"
+      ],
+      "osx": {
+        "args": [
+          "-C",
+          "${workspaceFolder}/../phantom_test/binary_26.04.18/",
+          "clean"
+        ],
+      },
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "presentation": {
+        // Reveal the output only if unrecognized errors occur.
+        "reveal": "silent"
+      },
+      // Use the standard MS compiler pattern to detect errors, warnings and infos
+      "problemMatcher": "$msCompile"
+    },
+  ]
+}

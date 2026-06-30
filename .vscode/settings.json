@@ -1,0 +1,55 @@
+{
+  "files.exclude": {
+    "**/.git": true,
+    "**/.svn": true,
+    "**/.hg": true,
+    "**/CVS": true,
+    "**/.DS_Store": true,
+    "**/Thumbs.db": true,
+    "**/*.un~": true,
+    "**/*.s": true,
+    "**/*.sln": true,
+    "**/*.vfproj": true,
+    "**/.classpath": true,
+    "**/.project": true,
+    "**/.settings": true,
+    "**/.factorypath": true,
+    "**/obj": true,
+    "**/*.o": true,
+    "**/*.mod": true,
+    "**/*.sh": true,
+    "**/.fmod": true
+  },
+  "files.associations": {
+    "*.mak": "makefile",
+    "*.nml": "FortranFreeForm",
+    "*.inc": "FortranFreeForm",
+    "typeinfo": "cpp"
+  },
+  "explorerExclude.backup": {},
+  "editor.tabSize": 3,
+  "fortran.linter.includePaths": [
+    "${workspaceFolder}",
+    "${workspaceFolder}/**/**",
+  ],
+  "fortran.linter.compiler": "gfortran",
+  "fortran.linter.extraArgs": [
+  // "-Wunused-variable",
+  // "-Wunused-dummy-argument"
+  ],
+  "fortran.linter.modOutput": "${workspaceFolder}/build/linter",
+  "fortran.formatting.formatter": "findent",
+  "fortran.formatting.findentArgs": [
+    "-r1",
+    "-m1",
+    "-c3",
+    "-Rr",
+    "-C-",
+    "-k-",
+    "-j1"
+  ],
+  "python.defaultInterpreterPath": "${env:PYTHON_INSTALL_LOC}/phantom/bin/python",
+  "python.analysis.typeCheckingMode": "basic",
+  "editor.detectIndentation": false,
+  "todo-tree.tree.scanMode": "workspace",
+}
