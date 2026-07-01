@@ -806,6 +806,14 @@ ifeq ($(SETUP), binary)
     GRAVITY=yes
 endif
 
+ifeq ($(SETUP), stripping)
+#   binary stars
+    SETUPFILE= setup_binary.f90
+    ANALYSIS= ${SRCNIMHD} utils_summary.o ptmass.o energies.o analysis_stripping_tools.f90 analysis_stripping.f90 
+    KNOWN_SETUP=yes
+    GRAVITY=yes
+endif
+
 ifeq ($(SETUP), binarybh)
 #   binary black hole inspiral with circumbinary disc or TDE
     SETUPFILE= setup_grdisc.f90
