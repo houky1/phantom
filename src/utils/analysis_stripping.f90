@@ -34,7 +34,9 @@ module analysis
       com, vcom,&
       evector_old,&
       time_old,&
-      omega_old
+      omega_old,&
+      correct_sign_evector,&
+      get_internal_quadrupole
 
    implicit none
 
@@ -99,7 +101,9 @@ contains
 
       density_cutoff = density_cutoff_cgs / unit_density
 
-      call analyse_binary_system(dumpfile, xyzh, vxyzu, time, npart, density_cutoff, iunit, particlemass)
+      !call analyse_binary_system(dumpfile, xyzh, vxyzu, time, npart, density_cutoff, iunit, particlemass)
+      !call analyse_inertia(dumpfile, xyzh, vxyzu, time, npart, density_cutoff, iunit, particlemass)
+      call analyse_quadroupole_internal(dumpfile,xyzh,vxyzu,time,npart,density_cutoff,iunit,particlemass)
       ! call print_potential(dumpfile, time, iunit)
       ! call analyse_stars(dumpfile, xyzh, vxyzu, time, npart, density_cutoff, iunit, particlemass)
 
@@ -1301,5 +1305,300 @@ contains
 
    end subroutine L1_point
 !-----------------------------------------------------------------------
+   subroutine analyse_inertia(dumpfile,xyzh,vxyzu,time,npart,density_cutoff,iunit,particlemass)
 
+      use dim,          only: maxp, maxvxyzu
+      use centreofmass, only: get_centreofmass, get_total_angular_momentum
+      use vectorutils,  only: matrixinvert3D
+
+      character(len=*), intent(in) :: dumpfile
+      real,             intent(in) :: time
+      integer,          intent(in) :: npart
+      real,             intent(in) :: xyzh(:,:), vxyzu(:,:)
+      real,             intent(in) :: density_cutoff
+      integer,          intent(in) :: iunit
+      real,             intent(in) :: particlemass
+
+      integer                      :: npartused
+      real                         :: rmax
+      integer                      :: smallIIndex
+      real                         :: inertia(3,3)
+      real                         :: principle(3), evectors(3,3)
+      real                         :: principleA(3), evectorsA(3,3)
+      real                         :: principleB(3), evectorsB(3,3)
+      real                         :: L1(3)
+
+      integer                      :: i, iA, iB
+
+      real(kind=8)                 :: xposA(3), xposB(3), vposA(3), vposB(3)
+      integer                      :: npartA, npartB
+      real                         :: xyzhA(4,maxp), vxyzuA(maxvxyzu, maxp)
+      real                         :: xyzhB(4,maxp), vxyzuB(maxvxyzu, maxp)
+      real                         :: inertiaA(3,3), inertiaB(3,3)
+
+      !--Open file (appendif exists)
+      fileout = trim(dumpfile(1:index(dumpfile,'_')-1))//'_inertia.dat'
+      inquire(file=fileout,exist=iexist)
+      if(firstcall .or. .not.iexist) then
+         open(iunit,file=fileout,status='replace')
+         write(iunit,"('#',28(1x,'[',i2.2,1x,a11,']',2x))") &
+            1, 'time',           &
+            2, 'I_xx',           &
+            3, 'I_xy',           &
+            4, 'I_xz',           &
+            5, 'I_yx',           &
+            6, 'I_yy',           &
+            7, 'I_yz',          &
+            8, 'I_zx',          &
+            9, 'I_zy',          &
+            10, 'I_zz',          &
+            11, 'IA_xx',         &
+            12, 'IA_xy',         &
+            13, 'IA_xz',         &
+            14, 'IA_yx',         &
+            15, 'IA_yy',         &
+            16, 'IA_yz',         &
+            17, 'IA_zx',         &
+            18, 'IA_zy',         &
+            19, 'IA_zz',         &
+            20, 'IB_xx',         &
+            21, 'IB_xy',         &
+            22, 'IB_xz',         &
+            23, 'IB_yx',         &
+            24, 'IB_yy',         &
+            25, 'IB_yz',         &
+            26, 'IB_zx',         &
+            27, 'IB_zy',         &
+            28, 'IB_zz'
+      else
+         open(iunit,file=fileout,position='append')
+      endif
+
+      call get_momentofinertia(xyzh, vxyzu, com, vcom, npart, density_cutoff, particlemass,&
+         npartused, inertia, principle, evectors, rmax)
+      smallIIndex = minloc(principle, dim=1)
+
+      call correct_sign_evector(evectors(:, smallIIndex), evector_old)
+      evector_old = evectors(:, smallIIndex)
+
+      call L1_point(2, xyzh, particlemass, npart, L1_projection, L1)
+
+      iA = 1
+      iB = 1
+
+      do i = 1, npart
+         if(dot_product(xyzh(1:3,i), evector_old) >= L1_projection) then
+            xyzhA(:,iA) = xyzh(:,i)
+            vxyzuA(:,iA) = vxyzu(:,i)
+            iA = iA + 1
+         else
+            xyzhB(:,iB) = xyzh(:,i)
+            vxyzuB(:,iB) = vxyzu(:,i)
+            iB = iB + 1
+         endif
+      enddo
+
+      npartA = iA - 1
+      npartB = iB - 1
+
+      call get_centreofmass(xposA, vposA, npartA, xyzhA, vxyzuA)
+      call get_centreofmass(xposB, vposB, npartB, xyzhB, vxyzuB)
+
+      call get_momentofinertia(xyzhA, vxyzuA, xposA, vposA, npartA, density_cutoff, particlemass,&
+         npartused, inertiaA, principleA, evectorsA, rmax)
+
+      call get_momentofinertia(xyzhB, vxyzuB, xposB, vposB, npartB, density_cutoff, particlemass,&
+         npartused, inertiaB, principleB, evectorsB, rmax)
+
+      write(iunit,'(37(es18.10,1x))') &
+         time,                         &
+         inertia(1,1),                 &
+         inertia(1,2),                 &
+         inertia(1,3),                 &
+         inertia(2,1),                 &
+         inertia(2,2),                 &
+         inertia(2,3),                 &
+         inertia(3,1),                 &
+         inertia(3,2),                 &
+         inertia(3,3),                 &
+         inertiaA(1,1),                &
+         inertiaA(1,2),                &
+         inertiaA(1,3),                &
+         inertiaA(2,1),                &
+         inertiaA(2,2),                &
+         inertiaA(2,3),                &
+         inertiaA(3,1),                &
+         inertiaA(3,2),                &
+         inertiaA(3,3),                &
+         inertiaB(1,1),                &
+         inertiaB(1,2),                &
+         inertiaB(1,3),                &
+         inertiaB(2,1),                &
+         inertiaB(2,2),                &
+         inertiaB(2,3),                &
+         inertiaB(3,1),                &
+         inertiaB(3,2),                &
+         inertiaB(3,3)
+
+      close(iunit)
+      !
+   end subroutine analyse_inertia
+!-------------------------------------------------------------
+   subroutine analyse_quadroupole_internal(dumpfile,xyzh,vxyzu,time,npart,density_cutoff,iunit,particlemass)
+
+      use vectorutils, only:cross_product3D
+      use dim,          only: maxp, maxvxyzu
+
+      character(len=*), intent(in) :: dumpfile
+      real,             intent(in) :: time
+      integer,          intent(in) :: npart
+      real,             intent(in) :: xyzh(:,:), vxyzu(:,:)
+      real,             intent(in) :: density_cutoff
+      integer,          intent(in) :: iunit
+      real,             intent(in) :: particlemass
+
+      integer                      :: npartused
+      real                         :: rmax
+      integer                      :: smallIIndex
+      real                         :: inertia(3,3)
+      real                         :: principle(3), evectors(3,3)
+      real                         :: L1(3)
+
+      integer                      :: i, iA, iB
+
+      real(kind=8)                 :: xposA(3), xposB(3), vposA(3), vposB(3)
+      integer                      :: npartA, npartB
+      real                         :: xyzhA(4,maxp), vxyzuA(maxvxyzu, maxp)
+      real                         :: xyzhB(4,maxp), vxyzuB(maxvxyzu, maxp)
+      real                         :: inertiaA(3,3), inertiaB(3,3)
+      real                         :: avec(3), vrel(3)
+      real                         :: e1(3), e2(3), e3(3)
+      real                         :: qA(3,3), qB(3,3)
+
+      !--Open file (appendif exists)
+      fileout = trim(dumpfile(1:index(dumpfile,'_')-1))//'_quadroupoles.dat'
+      inquire(file=fileout,exist=iexist)
+      if(firstcall .or. .not.iexist) then
+         open(iunit,file=fileout,status='replace')
+         write(iunit,"('#',20(1x,'[',i2.2,1x,a11,']',2x))") &
+            1, 'time',           &
+            2, 'a',              &
+            3, 'qA_xx',          &
+            4, 'qA_xy',          &
+            5, 'qA_xz',          &
+            6, 'qA_yx',          &
+            7, 'qA_yy',          &
+            8, 'qA_yz',          &
+            9, 'qA_zx',          &
+            10, 'qA_zy',         &
+            11,'qA_zz',          &
+            12,'qB_xx',          &
+            13,'qB_xy',          &
+            14,'qB_xz',          &
+            15,'qB_yx',          &
+            16,'qB_yy',          &
+            17,'qB_yz',          &
+            18,'qB_zx',          &
+            19,'qB_zy',          &
+            20,'qB_zz'
+      else
+         open(iunit,file=fileout,position='append')
+      endif
+      !
+      ! Calculate the tensor inertia and evectors
+      call get_momentofinertia(xyzh, vxyzu, com, vcom, npart, density_cutoff, particlemass,&
+         npartused, inertia, principle, evectors, rmax)
+      smallIIndex = minloc(principle, dim=1)
+      !Correct sign of evector
+      call correct_sign_evector(evectors(:, smallIIndex), evector_old)
+      evector_old = evectors(:, smallIIndex)
+      !Finding L1
+      call L1_point(2, xyzh, particlemass, npart, L1_projection, L1)
+
+      iA = 1
+      iB = 1
+      !Separation of 2 components by L1 projection
+      do i = 1, npart
+         if(dot_product(xyzh(1:3,i), evector_old) >= L1_projection) then
+            xyzhA(:,iA) = xyzh(:,i)
+            vxyzuA(:,iA) = vxyzu(:,i)
+            iA = iA + 1
+         else
+            xyzhB(:,iB) = xyzh(:,i)
+            vxyzuB(:,iB) = vxyzu(:,i)
+            iB = iB + 1
+         endif
+      enddo
+
+      npartA = iA - 1
+      npartB = iB - 1
+
+      call get_centreofmass(xposA, vposA, npartA, xyzhA, vxyzuA)
+      call get_centreofmass(xposB, vposB, npartB, xyzhB, vxyzuB)
+
+      !--relative vector and velocity
+      do i = 1,3
+         avec(i) = xposB(i) - xposA(i)
+         vrel(i) = vposB(i) - vposA(i)
+      enddo
+
+      ! Тестовые проверки, чему равны вектора
+      write(*,*) 'avec = ', avec
+      write(*,*) 'vrel = ', vrel
+      ! (Вообще по-хорошему проверять норму векторов на 0...)
+      write(*,*) 'avec norm = ', sqrt(dot_product(avec,avec))
+
+      !--first basis vector
+      e1 = avec/sqrt(dot_product(avec, avec))
+
+      !--third basis vector
+      call cross_product3D(avec, vrel, e3)
+      e3 = e3/sqrt(dot_product(e3, e3))
+
+      !--second basis vector
+      call cross_product3D(e3, e1, e2)
+
+      !Test Orthogonalization == 0
+      write(*,*) dot_product(e1,e2)
+      write(*,*) dot_product(e1,e3)
+      write(*,*) dot_product(e2,e3)
+      !Test Normalization == 1
+      write(*,*) sqrt(dot_product(e1,e1))
+      write(*,*) sqrt(dot_product(e2,e2))
+      write(*,*) sqrt(dot_product(e3,e3))
+
+      call get_internal_quadrupole(xyzhA, xposA, e1, e2, e3, &
+         npartA, density_cutoff, particlemass, qA)
+
+      call get_internal_quadrupole(xyzhB, xposB, e1, e2, e3, &
+         npartB, density_cutoff, particlemass, qB)
+      !Checking the principal axis of tensor inertia with direction of e1
+      write(*,*) 'Checking', dot_product(e1, evector_old)
+      !
+      write(iunit,'(20(es18.10,1x))') &
+         time,                        &
+         sqrt(dot_product(avec,avec)), &
+         qA(1,1),                      &
+         qA(1,2),                      &
+         qA(1,3),                      &
+         qA(2,1),                      &
+         qA(2,2),                      &
+         qA(2,3),                      &
+         qA(3,1),                      &
+         qA(3,2),                      &
+         qA(3,3),                      &
+         qB(1,1),                      &
+         qB(1,2),                      &
+         qB(1,3),                      &
+         qB(2,1),                      &
+         qB(2,2),                      &
+         qB(2,3),                      &
+         qB(3,1),                      &
+         qB(3,2),                      &
+         qB(3,3)
+
+      close(iunit)
+      !
+   end subroutine analyse_quadroupole_internal
+   !-------------------------------------------------------------
 end module analysis

@@ -41,7 +41,8 @@ module analysis_stripping_tools
    !
    ! subroutines
    !
-   public :: get_momentofinertia, calculate_omega, correct_evector
+   public :: get_momentofinertia, calculate_omega, correct_evector, &
+      correct_sign_evector, get_internal_quadrupole
    private
 
 contains
@@ -74,6 +75,7 @@ contains
       real,   optional, intent(out) :: omega(3)
 
       integer                       :: i
+      real                          :: inertia_copy(3,3)
       real                          :: dot_inertia(3,3)
       integer                       :: smallIIndex
       real                          :: smallI
@@ -138,6 +140,7 @@ contains
       !--Multiply in constant
       inertia      = inertia*particlemass
       dot_inertia  = dot_inertia*particlemass
+      inertia_copy = inertia
       !
 ! #ifdef LAPACK
       ! inertia2 = inertia
@@ -147,8 +150,7 @@ contains
       !
 #ifndef LAPACK
       !  note: i is a dummy out-integer that we don't care about
-      call jacobi(inertia,3,3,principle,evectors,i)
-
+      call jacobi(inertia_copy,3,3,principle,evectors,i)
       ! write(*,*) 'Eigenvalues JACOBI:'
       ! do i = 1, 3
       !   write(*,*) i, principle(i)
@@ -160,8 +162,8 @@ contains
       ! enddo
       ! write(*,*)
 #else
-      call eigensystem(inertia,3,principle)
-      evectors = inertia
+      call eigensystem(inertia_copy,3,principle)
+      evectors = inertia_copy
       ! call eigensystem(inertia2,3,principle)
       ! evectors = inertia2
 
@@ -419,6 +421,70 @@ contains
       endif
 
    end subroutine correct_evector
+!-----------------------------------------------------------------------
+! Correct sign of evectors
+!-----------------------------------------------------------------------
+   subroutine correct_sign_evector(evector, evector_prev)
+
+      real, intent(inout) :: evector(3)
+      real, intent(in)    :: evector_prev(3)
+
+      if (dot_product(evector, evector_prev) < 0.0) then
+         evector = -evector
+      endif
+
+   end subroutine correct_sign_evector
+!-----------------------------------------------------------------------
+! Calculate the traceless quadrupole
+!-----------------------------------------------------------------------
+   subroutine get_internal_quadrupole(xyzh, com, e1, e2, e3, npart, density_cutoff, particlemass, q)
+
+      use part, only: rhoh
+
+      implicit none
+
+      integer, intent(in) :: npart
+      real, intent(in)    :: xyzh(:,:)
+      real, intent(in)    :: com(3)
+      real, intent(in)    :: e1(3), e2(3), e3(3)
+      real, intent(in)    :: particlemass
+      real, intent(in)    :: density_cutoff
+      real, intent(out)   :: q(3,3)
+
+      integer :: i
+      real    :: xi(3)
+      real    :: coord(3)
+      real    :: r2
+
+      q = 0.
+      do i = 1, npart
+         if(rhoh(xyzh(4,i),particlemass) > density_cutoff) then
+            xi = xyzh(1:3,i) - com
+
+            coord(1) = dot_product(xi,e1)
+            coord(2) = dot_product(xi,e2)
+            coord(3) = dot_product(xi,e3)
+
+            r2 = dot_product(coord,coord)
+
+            q(1,1) = q(1,1) + coord(1)*coord(1) - r2/3.
+            q(2,2) = q(2,2) + coord(2)*coord(2) - r2/3.
+            q(3,3) = q(3,3) + coord(3)*coord(3) - r2/3.
+
+            q(1,2) = q(1,2) + coord(1)*coord(2)
+            q(1,3) = q(1,3) + coord(1)*coord(3)
+            q(2,3) = q(2,3) + coord(2)*coord(3)
+         endif
+      enddo
+
+      q(2,1) = q(1,2)
+      q(3,1) = q(1,3)
+      q(3,2) = q(2,3)
+      q = particlemass*q
+
+      write(*,*) 'Trace = ', q(1,1)+q(2,2)+q(3,3)
+
+   end subroutine get_internal_quadrupole
 !-----------------------------------------------------------------------
 ! Calculate the fifth time derivative of the quadrupole moment
 !-----------------------------------------------------------------------
