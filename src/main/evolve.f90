@@ -104,21 +104,33 @@ end subroutine evol_init
 !+
 !----------------------------------------------------------------
 subroutine evol(infile,logfile,evfile,dumpfile,flag)
- use dim,              only:do_radiation,use_dustgrowth_coala
- use io_control,       only:at_simulation_end
- use part,             only:npart,xyzh,fxyzu,vxyzu,rad,radprop
- use part,             only:grainsize,dustevol,deltav,eos_vars,fext,dustfrac
- use radiation_utils,  only:update_radenergy,exchange_radiation_energy,implicit_radiation
- use step_lf_global,   only:step
- use timestep,         only:time,dt,dtmax,nsteps,dtextforce,rhomaxnow
- use timestep_ind,     only:nactive
- use growth_coala,     only:get_growth_rate_coala
+ use dim,                        only:do_radiation,use_dustgrowth_coala
+ use io_control,                 only:at_simulation_end
+ use part,                       only:npart,xyzh,fxyzu,vxyzu,rad,radprop
+ use part,                       only:grainsize,dustevol,deltav,eos_vars,fext,dustfrac
+ use radiation_utils,            only:update_radenergy,exchange_radiation_energy,implicit_radiation
+ use step_lf_global,             only:step
+ use timestep,                   only:time,dt,dtmax,nsteps,dtextforce,rhomaxnow
+ use timestep_ind,               only:nactive
+ use growth_coala,               only:get_growth_rate_coala
+ use options,                    only:use_halted_pendulum_relax
+ use halted_pendulum_relaxation, only:apply_halted_pendulum_relax
+ use io,                         only:id,master,iprint,fatal
+ 
  character(len=*), intent(in)    :: infile
  character(len=*), intent(inout) :: logfile,evfile,dumpfile
  integer,          intent(in), optional :: flag
  real            :: dtnew
  real(kind=4)    :: t1,tcpu1
  logical         :: do_radiation_update,abortrun
+ logical         :: hpr_halted
+ logical, save   :: first_call = .true.
+ 
+
+if (use_halted_pendulum_relax .and. first_call .and. id == master) then
+   write(iprint,"(a)") ' halted-pendulum relaxation hook enabled'
+   first_call = .false.
+endif
 
  ! the following isrequired because evol is called multiple times in AMUSE... -SR
  if (.not. initialized) call evol_init(time,dtmax,rhomaxnow,dt)
@@ -126,6 +138,7 @@ subroutine evol(infile,logfile,evfile,dumpfile,flag)
  ! logical checks
  do_radiation_update = do_radiation .and. exchange_radiation_energy .and. .not.implicit_radiation
 
+ hpr_halted = .false.
  !
  ! main timestepping loop
  !
@@ -141,6 +154,15 @@ subroutine evol(infile,logfile,evfile,dumpfile,flag)
     !  for individual timesteps this is the shortest timestep
     !
     call step(npart,nactive,time,dt,dtextforce,dtnew)
+    !
+    ! halted pendulum relaxation needs real velocities 
+    !
+    if (use_halted_pendulum_relax) then
+      call apply_halted_pendulum_relax(npart,time,dt,hpr_halted)
+   endif
+   if (hpr_halted) then
+      call fatal('evolve','HPR halt detected: derivative reset is not implemented yet')
+   endif
     !
     ! Strang splitting: implicit update for another half step
     !

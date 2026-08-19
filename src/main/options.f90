@@ -44,6 +44,9 @@ module options
 ! dust method
  logical, public :: use_dustfrac, use_hybrid, use_porosity
 
+ ! pendulum relaxation
+ logical, public :: use_halted_pendulum_relax
+
  ! pressure on sinks
  logical, public :: need_pressure_on_sinks
 
@@ -97,6 +100,7 @@ subroutine set_default_options
  iexternalforce = 0          ! external forces
  if (gr) iexternalforce = 1
  calc_erot = .false.         ! To allow rotational energies to be printed to .ev
+ use_halted_pendulum_relax = .false. 
 
  ! equation of state
  call set_defaults_eos
@@ -139,6 +143,8 @@ subroutine write_options_output(iunit)
  call write_inopt(curlv,'curlv','output curl v in dump files',iunit)
  call write_inopt(track_lum,'track_lum','write du/dt to dump files (for a "lightcurve")',iunit)
  if (calc_erot) call write_inopt(calc_erot,'calc_erot','include E_rot in the ev_file',iunit)
+ call write_inopt(use_halted_pendulum_relax,'use_halted_pendulum_relax', &
+                   'enable halted pendulum relaxation stage',iunit)
 
 end subroutine write_options_output
 
@@ -156,6 +162,8 @@ subroutine read_options_output(db,nerr)
  call read_inopt(curlv,    'curlv',    db,errcount=nerr,default=curlv)
  call read_inopt(track_lum,'track_lum',db,errcount=nerr,default=track_lum)
  call read_inopt(calc_erot,'calc_erot',db,errcount=nerr,default=calc_erot)
+ call read_inopt(use_halted_pendulum_relax,'use_halted_pendulum_relax', &
+                  db,errcount=nerr,default=use_halted_pendulum_relax)
 
 end subroutine read_options_output
 
