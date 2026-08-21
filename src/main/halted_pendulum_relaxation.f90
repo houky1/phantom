@@ -1,34 +1,37 @@
 !--------------------------------------------------------------------------!
-!
+! The Phantom Smoothed Particle Hydrodynamics code, by Daniel Price et al. !
 !--------------------------------------------------------------------------!
 module halted_pendulum_relaxation
 !
 ! Hook for halted-pendulum relaxation during the physical evolution.
 !
- use io,                    only:id,master,iprint
- use mpiutils,              only:reduceall_mpi
- use part,                  only:vxyzu,massoftype,igas,isdead_or_accreted,xyzh
+ use io,       only:id,master,iprint
+ use mpiutils, only:reduceall_mpi
+ use deriv,     only:derivs
+ use part,     only:vxyzu,massoftype,igas,isdead_or_accreted,xyzh,fxyzu,fext,divcurlv,divcurlB, &
+                   Bevol,dBevol,rad,drad,radprop,dustprop,ddustprop,dustevol,ddustevol,filfac, &
+                   dustfrac,eos_vars,pxyzu,dens,metrics,apr_level
  implicit none
  private
- integer, parameter         :: nwindow = 7
- integer, parameter         :: max_halts = 10
- integer, save              :: nhalts = 0
- real,    save              :: time_window(nwindow) = 0.
- real,    save              :: ekin_window(nwindow) = 0.
- integer, save              :: nstored = 0
- logical, save              :: first_call = .true.
- public                     :: apply_halted_pendulum_relax
+ integer, parameter :: nwindow = 7
+ integer, parameter :: max_halts = 10
+ integer, save :: nhalts = 0
+ real,    save :: time_window(nwindow) = 0.
+ real,    save :: ekin_window(nwindow) = 0.
+ integer, save :: nstored = 0
+ logical, save :: first_call = .true.
+ public :: apply_halted_pendulum_relax
 
 contains
 
 subroutine apply_halted_pendulum_relax(npart,time,dt,halted)
- integer, intent(in)        :: npart
- real,    intent(in)        :: time,dt
- logical, intent(out)       :: halted
- real                       :: ekin,t_sample,tmax,aa,bb,cc
- logical                    :: has_maximum
- integer                    :: i
- 
+ integer, intent(inout)  :: npart
+ real,    intent(in)  :: time,dt
+ logical, intent(out) :: halted
+ real :: ekin,t_sample,tmax,aa,bb,cc
+ logical :: has_maximum
+ integer :: i
+
  halted = .false.
  if (nhalts >= max_halts) return
 
@@ -60,23 +63,35 @@ subroutine apply_halted_pendulum_relax(npart,time,dt,halted)
  if (nstored == nwindow) then
     call fit_quadratic(time_window,ekin_window,aa,bb,cc,has_maximum)
     if (has_maximum) then
-        tmax = -bb/(2.*aa) + sum(time_window)/real(nwindow)
-
-        if (tmax >= time_window(1) .and. tmax <= time_window(nwindow)) then
-            if (id==master) then
-                write(iprint,"(a,i3,3(es14.6))") &
-                ' HPR halt, number, t, Ekin, tmax = ',nhalts+1,t_sample,ekin,tmax
-            endif
-
-            vxyzu(1:3,1:npart) = 0.
-            nhalts = nhalts + 1
-            nstored = 0
-            halted = .true.
-        endif
+       tmax = -bb/(2.*aa) + sum(time_window)/real(nwindow)
+       if (tmax >= time_window(1) .and. tmax <= time_window(nwindow)) then
+          if (id==master) then
+             write(iprint,"(a,i3,3(es14.6))") &
+             ' HPR halt, number, t, Ekin, tmax = ',nhalts+1,t_sample,ekin,tmax
+          endif
+          call reset_halted_pendulum_state(npart,time,dt)
+          nhalts = nhalts + 1
+          nstored = 0
+          halted = (nhalts >= max_halts)
+       endif
     endif
  endif
 
 end subroutine apply_halted_pendulum_relax
+
+subroutine reset_halted_pendulum_state(npart,time,dt)
+ integer, intent(inout) :: npart
+ real,    intent(in) :: time,dt
+ real :: dtnew
+
+ vxyzu(1:3,1:npart) = 0.
+ call derivs(2,npart,npart,xyzh,vxyzu,fxyzu,fext,divcurlv,divcurlB,Bevol,dBevol, &
+             rad,drad,radprop,dustprop,ddustprop,dustevol,ddustevol,filfac,dustfrac, &
+             eos_vars,time,dt,dtnew,pxyzu,dens,metrics,apr_level)
+
+ if (id==master) write(iprint,"(a,es14.6)") ' HPR reset: fxyzu recomputed at t = ',time
+
+end subroutine reset_halted_pendulum_state
 
 subroutine fit_quadratic(x,y,aa,bb,cc,has_maximum)
  real,    intent(in)  :: x(:),y(:)

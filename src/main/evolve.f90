@@ -115,7 +115,7 @@ subroutine evol(infile,logfile,evfile,dumpfile,flag)
  use growth_coala,               only:get_growth_rate_coala
  use options,                    only:use_halted_pendulum_relax
  use halted_pendulum_relaxation, only:apply_halted_pendulum_relax
- use io,                         only:id,master,iprint,fatal
+ use io,                         only:id,master,iprint
  
  character(len=*), intent(in)    :: infile
  character(len=*), intent(inout) :: logfile,evfile,dumpfile
@@ -123,7 +123,7 @@ subroutine evol(infile,logfile,evfile,dumpfile,flag)
  real            :: dtnew
  real(kind=4)    :: t1,tcpu1
  logical         :: do_radiation_update,abortrun
- logical         :: hpr_halted
+ logical         :: hpr_relax_complete
  logical, save   :: first_call = .true.
  
 
@@ -138,7 +138,7 @@ endif
  ! logical checks
  do_radiation_update = do_radiation .and. exchange_radiation_energy .and. .not.implicit_radiation
 
- hpr_halted = .false.
+ hpr_relax_complete = .false.
  !
  ! main timestepping loop
  !
@@ -158,11 +158,9 @@ endif
     ! halted pendulum relaxation needs real velocities 
     !
     if (use_halted_pendulum_relax) then
-      call apply_halted_pendulum_relax(npart,time,dt,hpr_halted)
+      call apply_halted_pendulum_relax(npart,time,dt,hpr_relax_complete)
    endif
-   if (hpr_halted) then
-      call fatal('evolve','HPR halt detected: derivative reset is not implemented yet')
-   endif
+   if (hpr_relax_complete) call hpr_restart_accounting(time,dtmax)
     !
     ! Strang splitting: implicit update for another half step
     !
@@ -389,7 +387,29 @@ subroutine evol_poststep(infile,logfile,evfile,dumpfile,time,t1,tcpu1,dt,dtmax,n
  if (.not.iexist) egged = .false.
 
 end subroutine evol_poststep
-
+!----------------------------------------------------------------
+!+
+!  called once, when halted-pendulum relaxation has completed
+!  (nhalts has reached max_halts): resets the time origin and
+!  step/dump counters so that the "official" physical evolution
+!  is timed from this point, and resets the conservation-check
+!  baseline (energy, angular momentum) to the post-relaxation state
+!+
+!----------------------------------------------------------------
+subroutine hpr_restart_accounting(time,dtmax)
+ use io,             only:id,master,iprint
+ use checkconserved, only:init_conservation_checks
+ real, intent(inout) :: time
+ real, intent(in)    :: dtmax
+ 
+ if (id==master) write(iprint,"(a)") &
+    ' HPR: relaxation complete, resetting time origin for physical evolution'
+ 
+ time = 0.
+ call init_counters(time,dtmax)
+ call init_conservation_checks()
+ 
+end subroutine hpr_restart_accounting
 !----------------------------------------------------------------
 !+
 !  initialize various counters
