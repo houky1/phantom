@@ -44,8 +44,10 @@ module options
 ! dust method
  logical, public :: use_dustfrac, use_hybrid, use_porosity
 
- ! pendulum relaxation
- logical, public :: use_halted_pendulum_relax
+ ! Halted-Pendulum Relaxation
+ logical, public :: use_hpr
+ integer, public :: hpr_nfit
+ real,    public :: hpr_ekin_tol
 
  ! pressure on sinks
  logical, public :: need_pressure_on_sinks
@@ -100,7 +102,10 @@ subroutine set_default_options
  iexternalforce = 0          ! external forces
  if (gr) iexternalforce = 1
  calc_erot = .false.         ! To allow rotational energies to be printed to .ev
- use_halted_pendulum_relax = .false. 
+
+ use_hpr       = .false.     ! apply Halted-Pendulum Relaxation
+ hpr_nfit      = 5           ! number of points for polynomial fit (>=3)
+ hpr_ekin_tol  = 1.e-3       ! min ekin_corot/ekin_total to trigger HPR 
 
  ! equation of state
  call set_defaults_eos
@@ -143,8 +148,11 @@ subroutine write_options_output(iunit)
  call write_inopt(curlv,'curlv','output curl v in dump files',iunit)
  call write_inopt(track_lum,'track_lum','write du/dt to dump files (for a "lightcurve")',iunit)
  if (calc_erot) call write_inopt(calc_erot,'calc_erot','include E_rot in the ev_file',iunit)
- call write_inopt(use_halted_pendulum_relax,'use_halted_pendulum_relax', &
-                   'enable halted pendulum relaxation stage',iunit)
+ call write_inopt(use_hpr,'use_hpr','apply Halted-Pendulum Relaxation',iunit)
+ if (use_hpr) then
+    call write_inopt(hpr_nfit,'hpr_nfit','number of points for polynomial fit (>=3)',iunit)
+    call write_inopt(hpr_ekin_tol,'hpr_ekin_tol','min ekin_corot/ekin_total to trigger HPR',iunit)
+ endif
 
 end subroutine write_options_output
 
@@ -162,8 +170,11 @@ subroutine read_options_output(db,nerr)
  call read_inopt(curlv,    'curlv',    db,errcount=nerr,default=curlv)
  call read_inopt(track_lum,'track_lum',db,errcount=nerr,default=track_lum)
  call read_inopt(calc_erot,'calc_erot',db,errcount=nerr,default=calc_erot)
- call read_inopt(use_halted_pendulum_relax,'use_halted_pendulum_relax', &
-                  db,errcount=nerr,default=use_halted_pendulum_relax)
+ call read_inopt(use_hpr,     'use_hpr',     db,errcount=nerr,default=use_hpr)
+ if (use_hpr) then
+    call read_inopt(hpr_nfit,    'hpr_nfit',    db,errcount=nerr,default=hpr_nfit)
+    call read_inopt(hpr_ekin_tol,'hpr_ekin_tol',db,errcount=nerr,default=hpr_ekin_tol)
+ endif
 
 end subroutine read_options_output
 
