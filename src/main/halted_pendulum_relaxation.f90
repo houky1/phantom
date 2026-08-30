@@ -37,6 +37,8 @@ module halted_pendulum_relaxation
    real, save :: evector_old(3) = (/1.,0.,0./)
    logical, save :: hpr_first_call = .true.
    logical, save :: hpr_initialized = .false.
+   real,    save, private :: hpr_time_last_halt = 0.
+   logical, save, private :: hpr_finished_latched = .false.
    private
 
 contains
@@ -71,13 +73,15 @@ contains
       hpr_napplied       = 0
       evector_old        = (/1.,0.,0./)
       hpr_first_call     = .true.
+      hpr_time_last_halt = 0.
+      hpr_finished_latched = .false.
       hpr_initialized = .true.
 
    end subroutine hpr_init
 
-   subroutine hpr_check_and_apply(npart,xyzh,vxyzu,massoftype,t,applied)
+   subroutine hpr_check_and_apply(npart,xyzh,vxyzu,massoftype,t,applied,finished)
       use io,                        only:id,master,iprint
-      use options,                   only:use_hpr,hpr_nfit,hpr_ekin_tol
+      use options,                   only:use_hpr,hpr_nfit,hpr_ekin_tol,hpr_settle_time
       use part,                      only:igas
       use centreofmass,              only:get_centreofmass
       use halted_pendulum_tools,     only:get_momentofinertia,correct_sign_evector,L1_point
@@ -88,6 +92,7 @@ contains
       real,    intent(in)    :: massoftype(:)
       real,    intent(in)    :: t
       logical, intent(out)   :: applied
+      logical, intent(out)   :: finished
 
       real :: com(3),vcom(3)
       real :: inertia(3,3),principle(3),evectors(3,3),rmax
@@ -102,11 +107,14 @@ contains
       integer :: i0,i1
 
 
-      applied = .false.
+      applied  = .false.
+      finished = .false.
       if (.not.use_hpr) return
 
-      if (hpr_first_call .and. id==master) then
-         write(iprint,"(a,i0,a)") ' HPR: monitoring corotating-frame kinetic energy, window = ',hpr_nfit,' samples'
+      if (hpr_first_call) then
+         if (id==master) write(iprint,"(a,i0,a)") &
+            ' HPR: monitoring corotating-frame kinetic energy, window = ',hpr_nfit,' samples'
+         hpr_time_last_halt = t
          hpr_first_call = .false.
       endif
 
@@ -125,8 +133,21 @@ contains
       call correct_sign_evector(evectors(:, smallIIndex), evector_old)
       evector_old = evectors(:, smallIIndex)
 
+      ! Exact L1 point from the full SPH potential. axis, com and omega
+      ! are passed explicitly -- L1_point (and everything it calls
+      ! internally) threads them through the golden-section search
+      ! itself, no module-level state is set as a side effect.
+      ! omega here is last step's estimate (hpr_omega_current is only
+      ! updated further below, after sep is known) -- one-step lag,
+      ! fine since omega evolves slowly compared to the timestep.
       call L1_point(2, xyzh, particlemass, npart, evector_old, com, hpr_omega_current, rmax, L1_projection, L1)
 
+      ! Split into the two stars using the L1 point just found.
+      ! split_by_axis accumulates each star's centre of mass directly
+      ! (MPI-safe, skips dead/accreted particles) instead of copying
+      ! all particle data into full-npart automatic arrays on the
+      ! stack every step, which is what the previous version did and
+      ! would overflow the stack for realistic particle counts.
       call split_by_axis(npart, xyzh, massoftype, evector_old, L1_projection, com1, m1, com2, m2)
       sep = com1 - com2
 
@@ -151,11 +172,33 @@ contains
                   hpr_napplied = hpr_napplied + 1
                   applied      = .true.
                   if (id==master) then
-                     write(iprint,"(a,i4,4(1x,es14.6))") &
-                        ' HPR halt #',hpr_napplied,t,ekin_corot,tmax,hpr_omega_current
+                     write(iprint,"(a,i4,a,es14.6,a,es14.6,a,es14.6,a,es14.6)") &
+                        ' HPR halt #',hpr_napplied,'  t = ',t,'  Ekin_corot = ',ekin_corot,&
+                        '  tmax = ',tmax,'  omega = ',hpr_omega_current
                   endif
                endif
             endif
+         endif
+      endif
+
+      ! Relaxation is considered complete once no halt has been needed
+      ! for a sustained period (hpr_settle_time), not on a single
+      ! non-trigger -- a lone .false. usually just means the pendulum
+      ! is mid-swing between two peaks, not that the amplitude has
+      ! actually decayed. hpr_settle_time = 0 (default) disables this
+      ! entirely, so HPR keeps monitoring indefinitely unless opted in.
+      if (applied) then
+         hpr_time_last_halt = t
+      else if (.not.hpr_finished_latched .and. hpr_settle_time > 0. .and. &
+         t - hpr_time_last_halt > hpr_settle_time) then
+         finished = .true.
+         hpr_finished_latched = .true.
+         use_hpr = .false.   ! stop paying for L1_point etc. from the next call on
+         if (id==master) then
+            write(iprint,"(a,i0,a)") &
+               ' HPR: relaxation complete after ',hpr_napplied,' halt(s) -- no halt needed for hpr_settle_time'
+            write(iprint,"(a,2(1x,es14.6))") &
+               ' HPR: final separation |a|, Omega = ',norm2(sep),hpr_omega_current
          endif
       endif
 

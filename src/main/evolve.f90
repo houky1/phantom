@@ -118,6 +118,7 @@ contains
       use growth_coala,               only:get_growth_rate_coala
       use options,                    only:use_hpr
       use halted_pendulum_relaxation, only:hpr_check_and_apply, hpr_init
+      use checkconserved,             only:init_conservation_checks
       use io,                         only:id,master,iprint
 
       character(len=*), intent(in)    :: infile
@@ -127,6 +128,7 @@ contains
       real(kind=4)    :: t1,tcpu1
       logical         :: do_radiation_update,abortrun
       logical         :: hpr_applied
+      logical         :: hpr_finished
       logical, save   :: first_call = .true.
 
 
@@ -162,10 +164,21 @@ contains
          call step(npart,nactive,time,dt,dtextforce,dtnew)
 
          if (use_hpr) then
-            call hpr_check_and_apply(npart, xyzh, vxyzu, massoftype, time+dt, hpr_applied)
+            call hpr_check_and_apply(npart, xyzh, vxyzu, massoftype, time+dt, hpr_applied, hpr_finished)
             if (hpr_applied) then
                call get_derivs_global()
+               ! HPR deliberately zeroes residual velocities, which
+               ! deliberately changes Etot -- re-baseline the
+               ! conservation check against the post-halt state so this
+               ! intentional change isn't flagged as a conservation
+               ! error on the next step. This does NOT reset time or
+               ! step/dump counters (unlike hpr_restart_accounting,
+               ! which is for when relaxation is fully finished, not
+               ! for each individual halt along the way).
+               call init_conservation_checks()
             endif
+         else
+            hpr_finished = .false.
          endif
          !
          ! Strang splitting: implicit update for another half step
@@ -178,6 +191,16 @@ contains
          call evol_poststep(infile,logfile,evfile,dumpfile,&
             time,t1,tcpu1,dt,dtmax,nactive,abortrun)
          if (abortrun) exit
+
+         ! Called once, on the step where HPR just declared itself
+         ! finished (see hpr_check_and_apply/hpr_settle_time). Placed
+         ! AFTER evol_poststep, not right after hpr_check_and_apply,
+         ! so that this step's dump/log still get written with the
+         ! correct (pre-reset) relaxation-phase time, and time=0 takes
+         ! effect starting cleanly from the NEXT iteration -- resetting
+         ! it earlier would just get overwritten by this step's own
+         ! time = time + dt update inside evol_poststep.
+         if (hpr_finished) call hpr_restart_accounting(time,dtmax)
 
       enddo timestepping
 
