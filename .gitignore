@@ -38,3 +38,4 @@ build/test000
 *.stb
 eos_lom.dat
 graphify-out/
+.github/copilot-instructions.md
