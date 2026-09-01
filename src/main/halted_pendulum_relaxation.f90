@@ -28,12 +28,13 @@ module halted_pendulum_relaxation
    integer, private :: hpr_napplied         = 0
 
    ! ring buffer for omega estimation from separation vector rotation
-   integer, parameter :: hpr_omegabuf = 5
+   integer, parameter :: hpr_omegabuf = 10
    real,    private :: hpr_sep_x(hpr_omegabuf) = 0.  ! x-component of separation vector
    real,    private :: hpr_sep_y(hpr_omegabuf) = 0.  ! y-component of separation vector
    real,    private :: hpr_sep_t(hpr_omegabuf) = 0.  ! time of each measurement
    integer, private :: hpr_nsep              = 0
    real,    private :: hpr_omega_current     = 0.     ! last estimated omega
+   real,    private :: hpr_omega_previous    = 0.     ! previous omega for checking stability
 
    real, save :: evector_old(3) = (/1.,0.,0./)
    logical, save :: hpr_first_call = .true.
@@ -172,11 +173,7 @@ contains
       endif
 
       ! Relaxation is considered complete once no halt has been needed
-      ! for a sustained period (hpr_settle_time), not on a single
-      ! non-trigger -- a lone .false. usually just means the pendulum
-      ! is mid-swing between two peaks, not that the amplitude has
-      ! actually decayed. hpr_settle_time = 0 (default) disables this
-      ! entirely, so HPR keeps monitoring indefinitely unless opted in.
+      ! for a sustained period (hpr_settle_time)
       if (applied) then
          hpr_time_last_halt = t
       else if (.not.hpr_finished_latched .and. hpr_settle_time > 0. .and. &
@@ -185,10 +182,13 @@ contains
          hpr_finished_latched = .true.
          use_hpr = .false.   ! stop paying for L1_point etc. from the next call on
          if (id==master) then
+            ! Recalculate Ekin_corot for the final output
+            call get_kinetic_energies(npart,xyzh,vxyzu,massoftype,omega_vec,com,ekin_corot,ekin_total)
             write(iprint,"(a,i0,a)") &
                ' HPR: relaxation complete after ',hpr_napplied,' halt(s) -- no halt needed for hpr_settle_time'
-            write(iprint,"(a,2(1x,es14.6))") &
-               ' HPR: final separation |a|, Omega = ',norm2(sep),hpr_omega_current
+            write(iprint,"(a,2(1x,es14.6),a,es14.6)") &
+               ' HPR: final separation |a|, Omega = ',norm2(sep),hpr_omega_current,&
+               '  Ekin_corot = ',ekin_corot
          endif
       endif
 
@@ -205,8 +205,11 @@ contains
 !----------------------------------------------------------------
    subroutine update_omega_estimate(sepx,sepy,t)
       real, intent(in) :: sepx,sepy,t
-      real :: phi_new,phi_old,dphi,dt_k,omega_sum
-      integer :: k
+      real :: phi_new,phi_old,dphi,dt_k,omega_sum,omega_raw
+      real :: omegas(hpr_omegabuf)  ! array for storing individual omega estimates
+      integer :: k, nvalid
+      real, parameter :: max_omega_change_factor = 2.0  ! maximum allowed change factor
+      real, parameter :: min_valid_dt = 1e-10            ! minimum valid time difference
 
       if (hpr_nsep < hpr_omegabuf) then
          hpr_nsep = hpr_nsep + 1
@@ -224,15 +227,47 @@ contains
 
       if (hpr_nsep < 2) return   ! not enough points yet; keep previous estimate
 
+      ! Store all individual omega estimates for filtering
+      omegas = 0.
+      nvalid = 0
       omega_sum = 0.
+
       do k=2,hpr_nsep
          phi_new = atan2(hpr_sep_y(k),  hpr_sep_x(k))
          phi_old = atan2(hpr_sep_y(k-1),hpr_sep_x(k-1))
          dphi    = wrap_angle(phi_new - phi_old)
          dt_k    = hpr_sep_t(k) - hpr_sep_t(k-1)
-         if (dt_k > 0.) omega_sum = omega_sum + dphi/dt_k
+         if (dt_k > min_valid_dt) then
+            omega_raw = dphi/dt_k
+            ! Filter out extreme values (outliers)
+            if (abs(omega_raw) < 1.0) then  ! reasonable physical limit
+               nvalid = nvalid + 1
+               omegas(nvalid) = omega_raw
+               omega_sum = omega_sum + omega_raw
+            endif
+         endif
       enddo
-      hpr_omega_current = omega_sum/real(hpr_nsep-1)
+
+      if (nvalid > 0) then
+         omega_raw = omega_sum/real(nvalid)
+
+         ! Smooth the omega estimate using exponential moving average
+         if (hpr_omega_previous == 0.) then
+            hpr_omega_current = omega_raw
+         else
+            ! Apply smoothing: 0.7 weight to previous, 0.3 to new estimate
+            hpr_omega_current = 0.7*hpr_omega_previous + 0.3*omega_raw
+
+            ! Limit the rate of change
+            if (abs(hpr_omega_current - hpr_omega_previous) > &
+               max_omega_change_factor * abs(hpr_omega_previous)) then
+               ! If change is too large, use weighted average closer to previous
+               hpr_omega_current = 0.9*hpr_omega_previous + 0.1*omega_raw
+            endif
+         endif
+
+         hpr_omega_previous = hpr_omega_current
+      endif
 
    end subroutine update_omega_estimate
 
@@ -246,14 +281,14 @@ contains
    real function wrap_angle(dphi) result(w)
       real, intent(in) :: dphi
       real, parameter :: pi = 4.*atan(1.)
+      real, parameter :: two_pi = 2.*pi
 
       w = dphi
-      do while (w > pi)
-         w = w - 2.*pi
-      enddo
-      do while (w <= -pi)
-         w = w + 2.*pi
-      enddo
+      ! Use modulo for better numerical stability
+      ! Bring angle to [0, 2*pi) first
+      w = w - two_pi * floor((w + pi) / two_pi)
+      ! Convert to (-pi, pi]
+      if (w > pi) w = w - two_pi
 
    end function wrap_angle
 
