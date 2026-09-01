@@ -118,7 +118,8 @@ contains
       use growth_coala,               only:get_growth_rate_coala
       use options,                    only:use_hpr
       use halted_pendulum_relaxation, only:hpr_check_and_apply, hpr_init
-      use checkconserved,             only:init_conservation_checks
+      use energies,                   only:compute_energies,etot,angtot,totmom,mdust,mtot
+      use checkconserved,             only:etot_in,angtot_in,totmom_in,mdust_in,mtot_in
       use io,                         only:id,master,iprint
 
       character(len=*), intent(in)    :: infile
@@ -167,15 +168,12 @@ contains
             call hpr_check_and_apply(npart, xyzh, vxyzu, massoftype, time+dt, hpr_applied, hpr_finished)
             if (hpr_applied) then
                call get_derivs_global()
-               ! HPR deliberately zeroes residual velocities, which
-               ! deliberately changes Etot -- re-baseline the
-               ! conservation check against the post-halt state so this
-               ! intentional change isn't flagged as a conservation
-               ! error on the next step. This does NOT reset time or
-               ! step/dump counters (unlike hpr_restart_accounting,
-               ! which is for when relaxation is fully finished, not
-               ! for each individual halt along the way).
-               call init_conservation_checks()
+               call compute_energies(time+dt)
+               etot_in   = etot
+               angtot_in = angtot
+               totmom_in = totmom
+               mdust_in  = mdust
+               mtot_in   = mtot
             endif
          else
             hpr_finished = .false.
@@ -193,13 +191,7 @@ contains
          if (abortrun) exit
 
          ! Called once, on the step where HPR just declared itself
-         ! finished (see hpr_check_and_apply/hpr_settle_time). Placed
-         ! AFTER evol_poststep, not right after hpr_check_and_apply,
-         ! so that this step's dump/log still get written with the
-         ! correct (pre-reset) relaxation-phase time, and time=0 takes
-         ! effect starting cleanly from the NEXT iteration -- resetting
-         ! it earlier would just get overwritten by this step's own
-         ! time = time + dt update inside evol_poststep.
+         ! finished (see hpr_check_and_apply/hpr_settle_time).
          if (hpr_finished) call hpr_restart_accounting(time,dtmax)
 
       enddo timestepping
@@ -419,24 +411,39 @@ contains
 !----------------------------------------------------------------
 !+
 !  called once, when halted-pendulum relaxation has completed
-!  (nhalts has reached max_halts): resets the time origin and
-!  step/dump counters so that the "official" physical evolution
-!  is timed from this point, and resets the conservation-check
-!  baseline (energy, angular momentum) to the post-relaxation state
+!  (see hpr_check_and_apply/hpr_settle_time): resets the time origin
+!  and step counters so that the "official" physical evolution is
+!  timed from this point, and re-baselines the conservation check
+!  (energy, angular momentum, ...) to the post-relaxation state -- see
+!  the comment on the per-halt rebaseline in evol() for why this has
+!  to be done by hand rather than via checkconserved::init_conservation_checks().
+!
+!  Dump numbering (noutput) is deliberately NOT reset here -- doing so
+!  would make the next dump reuse the filename of a dump already
+!  written during relaxation, silently overwriting it. Dump numbers
+!  therefore run continuously across the relaxation/physics boundary;
+!  only the time coordinate embedded in those dumps resets to 0.
 !+
 !----------------------------------------------------------------
    subroutine hpr_restart_accounting(time,dtmax)
       use io,             only:id,master,iprint
-      use checkconserved, only:init_conservation_checks
+      use energies,       only:compute_energies,etot,angtot,totmom,mdust,mtot
+      use checkconserved, only:etot_in,angtot_in,totmom_in,mdust_in,mtot_in
       real, intent(inout) :: time
       real, intent(in)    :: dtmax
 
       if (id==master) write(iprint,"(a)") &
          ' HPR: relaxation complete, resetting time origin for physical evolution'
 
+      call compute_energies(time)
+      etot_in   = etot
+      angtot_in = angtot
+      totmom_in = totmom
+      mdust_in  = mdust
+      mtot_in   = mtot
+
       time = 0.
-      call init_counters(time,dtmax)
-      call init_conservation_checks()
+      call init_counters(time,dtmax,reset_dump_counters=.false.)
 
    end subroutine hpr_restart_accounting
 !----------------------------------------------------------------
@@ -444,11 +451,16 @@ contains
 !  initialize various counters
 !+
 !----------------------------------------------------------------
-   subroutine init_counters(time,dtmax)
+   subroutine init_counters(time,dtmax,reset_dump_counters)
       use energies,     only:np_cs_eq_0,np_e_eq_0
       use timestep,     only:nsteps
       use timestep_ind, only:istepfrac
-      real, intent(in) :: time,dtmax
+      real,    intent(in) :: time,dtmax
+      logical, intent(in), optional :: reset_dump_counters
+      logical :: do_reset_dumps
+
+      do_reset_dumps = .true.
+      if (present(reset_dump_counters)) do_reset_dumps = reset_dump_counters
 
 ! total number of steps and number of steps since last dump
       nsteps    = 0
@@ -456,10 +468,15 @@ contains
       tzero = time  ! starting time
       tlast = time  ! time of last dump
 
-! number of snapshots that have been written
-      noutput          = 1
-      noutput_dtmax    = 1
-      ncount_fulldumps = 0
+! number of snapshots that have been written -- NOT reset when called
+! from hpr_restart_accounting (reset_dump_counters=.false.), otherwise
+! the next dump after HPR completes would reuse the filename of a
+! dump already written during relaxation and silently overwrite it
+      if (do_reset_dumps) then
+         noutput          = 1
+         noutput_dtmax    = 1
+         ncount_fulldumps = 0
+      endif
 
 ! time to print next
       tprint = time + dtmax

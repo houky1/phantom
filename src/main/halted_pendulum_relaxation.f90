@@ -1,4 +1,3 @@
-module halted_pendulum_relaxation
 !
 ! Halted-Pendulum Relaxation for tidally-locked binary stars
 !
@@ -13,6 +12,8 @@ module halted_pendulum_relaxation
 !
 ! References: Kaltenborn et al. (2023), ApJ 952, DOI 10.3847/1538-4357/acd75a
 !
+module halted_pendulum_relaxation
+
 
    implicit none
    public :: hpr_check_and_apply
@@ -133,28 +134,17 @@ contains
       call correct_sign_evector(evectors(:, smallIIndex), evector_old)
       evector_old = evectors(:, smallIIndex)
 
-      ! Exact L1 point from the full SPH potential. axis, com and omega
-      ! are passed explicitly -- L1_point (and everything it calls
-      ! internally) threads them through the golden-section search
-      ! itself, no module-level state is set as a side effect.
-      ! omega here is last step's estimate (hpr_omega_current is only
-      ! updated further below, after sep is known) -- one-step lag,
-      ! fine since omega evolves slowly compared to the timestep.
+      ! Exact L1 point from the full SPH potential.
       call L1_point(2, xyzh, particlemass, npart, evector_old, com, hpr_omega_current, rmax, L1_projection, L1)
 
       ! Split into the two stars using the L1 point just found.
-      ! split_by_axis accumulates each star's centre of mass directly
-      ! (MPI-safe, skips dead/accreted particles) instead of copying
-      ! all particle data into full-npart automatic arrays on the
-      ! stack every step, which is what the previous version did and
-      ! would overflow the stack for realistic particle counts.
       call split_by_axis(npart, xyzh, massoftype, evector_old, L1_projection, com1, m1, com2, m2)
       sep = com1 - com2
 
       call update_omega_estimate(sep(1),sep(2),t)
       omega_vec = (/0.,0.,hpr_omega_current/)
 
-      call get_kinetic_energies(npart,xyzh,vxyzu,massoftype,omega_vec,ekin_corot,ekin_total)
+      call get_kinetic_energies(npart,xyzh,vxyzu,massoftype,omega_vec,com,ekin_corot,ekin_total)
 
       call push_buffer(t,ekin_corot)
 
@@ -167,7 +157,7 @@ contains
             tmax = -bb/(2.*aa) + sum(hpr_tbuf(i0:i1))/real(hpr_nfit)
             if (tmax >= hpr_tbuf(i0) .and. tmax <= hpr_tbuf(i1)) then
                if (ekin_corot > hpr_ekin_tol*ekin_total) then
-                  call zero_residual_velocity(npart,xyzh,vxyzu,omega_vec)
+                  call zero_residual_velocity(npart,xyzh,vxyzu,omega_vec,com)
                   hpr_nbuf     = 0
                   hpr_napplied = hpr_napplied + 1
                   applied      = .true.
@@ -274,13 +264,14 @@ contains
 !  summed over all live particles, reduced across MPI ranks.
 !+
 !----------------------------------------------------------------
-   subroutine get_kinetic_energies(npart,xyzh,vxyzu,massoftype,omega_vec,ekin_corot,ekin_total)
+   subroutine get_kinetic_energies(npart,xyzh,vxyzu,massoftype,omega_vec,com_in,ekin_corot,ekin_total)
       use part,        only:iamtype,iphase,isdead_or_accreted
       use mpiutils,    only:reduceall_mpi
       use vectorutils, only:cross_product3D
       integer, intent(in)  :: npart
       real,    intent(in)  :: xyzh(:,:),vxyzu(:,:),massoftype(:)
       real,    intent(in)  :: omega_vec(3)
+      real,    intent(in)  :: com_in(3)
       real,    intent(out) :: ekin_corot,ekin_total
       integer :: i
       real :: mi,r(3),v_lab(3),v_orb(3),v_res(3)
@@ -290,7 +281,7 @@ contains
       do i=1,npart
          if (isdead_or_accreted(xyzh(4,i))) cycle
          mi    = massoftype(iamtype(iphase(i)))
-         r     = xyzh(1:3,i)
+         r     = xyzh(1:3,i) - com_in
          v_lab = vxyzu(1:3,i)
          call cross_product3D(omega_vec,r,v_orb)
          v_res = v_lab - v_orb
@@ -330,18 +321,19 @@ contains
 !  -- see the note at the call site in hpr_check_and_apply.
 !+
 !----------------------------------------------------------------
-   subroutine zero_residual_velocity(npart,xyzh,vxyzu,omega_vec)
+   subroutine zero_residual_velocity(npart,xyzh,vxyzu,omega_vec,com_in)
       use part,        only:isdead_or_accreted
       use vectorutils, only:cross_product3D
       integer, intent(in)    :: npart
       real,    intent(in)    :: xyzh(:,:)
       real,    intent(inout) :: vxyzu(:,:)
       real,    intent(in)    :: omega_vec(3)
+      real,    intent(in)    :: com_in(3)
       integer :: i
 
       do i=1,npart
          if (isdead_or_accreted(xyzh(4,i))) cycle
-         call cross_product3D(omega_vec,xyzh(1:3,i),vxyzu(1:3,i))
+         call cross_product3D(omega_vec,xyzh(1:3,i)-com_in,vxyzu(1:3,i))
       enddo
 
    end subroutine zero_residual_velocity

@@ -37,3 +37,4 @@ build/test000
 *.ilm
 *.stb
 eos_lom.dat
+graphify-out/
