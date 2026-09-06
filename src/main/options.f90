@@ -48,7 +48,6 @@ module options
    logical, public :: use_hpr
    integer, public :: hpr_nfit
    real,    public :: hpr_ekin_tol
-   real,    public :: hpr_settle_time
 
    ! pressure on sinks
    logical, public :: need_pressure_on_sinks
@@ -107,8 +106,6 @@ contains
       use_hpr       = .false.     ! apply Halted-Pendulum Relaxation
       hpr_nfit      = 5           ! number of points for polynomial fit (>=3)
       hpr_ekin_tol  = 1.e-3       ! min ekin_corot/ekin_total to trigger HPR
-      hpr_settle_time = 0.        ! stop HPR after this much time with no halt (0=never)
-
       ! equation of state
       call set_defaults_eos
 
@@ -153,7 +150,6 @@ contains
       call write_inopt(use_hpr,'use_hpr','apply Halted-Pendulum Relaxation',iunit)
       call write_inopt(hpr_nfit,'hpr_nfit','number of points for polynomial fit (>=3)',iunit)
       call write_inopt(hpr_ekin_tol,'hpr_ekin_tol','min ekin_corot/ekin_total to trigger HPR',iunit)
-      call write_inopt(hpr_settle_time,'hpr_settle_time','stop HPR after this much time with no halt (0=never)', iunit)
 
 
    end subroutine write_options_output
@@ -175,8 +171,6 @@ contains
       call read_inopt(use_hpr,     'use_hpr',     db,errcount=nerr,default=use_hpr)
       call read_inopt(hpr_nfit,    'hpr_nfit',    db,errcount=nerr,default=hpr_nfit)
       call read_inopt(hpr_ekin_tol,'hpr_ekin_tol',db,errcount=nerr,default=hpr_ekin_tol)
-      call read_inopt(hpr_settle_time,'hpr_settle_time',db,errcount=nerr,default=hpr_settle_time)
-
 
    end subroutine read_options_output
 

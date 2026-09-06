@@ -83,7 +83,7 @@ contains
 
    subroutine hpr_check_and_apply(npart,xyzh,vxyzu,massoftype,t,applied,finished)
       use io,                        only:id,master,iprint
-      use options,                   only:use_hpr,hpr_nfit,hpr_ekin_tol,hpr_settle_time
+      use options,                   only:use_hpr,hpr_nfit,hpr_ekin_tol
       use part,                      only:igas
       use centreofmass,              only:get_centreofmass
       use halted_pendulum_tools,     only:get_momentofinertia,correct_sign_evector,L1_point
@@ -169,26 +169,6 @@ contains
                   endif
                endif
             endif
-         endif
-      endif
-
-      ! Relaxation is considered complete once no halt has been needed
-      ! for a sustained period (hpr_settle_time)
-      if (applied) then
-         hpr_time_last_halt = t
-      else if (.not.hpr_finished_latched .and. hpr_settle_time > 0. .and. &
-         t - hpr_time_last_halt > hpr_settle_time) then
-         finished = .true.
-         hpr_finished_latched = .true.
-         use_hpr = .false.   ! stop paying for L1_point etc. from the next call on
-         if (id==master) then
-            ! Recalculate Ekin_corot for the final output
-            call get_kinetic_energies(npart,xyzh,vxyzu,massoftype,omega_vec,com,ekin_corot,ekin_total)
-            write(iprint,"(a,i0,a)") &
-               ' HPR: relaxation complete after ',hpr_napplied,' halt(s) -- no halt needed for hpr_settle_time'
-            write(iprint,"(a,2(1x,es14.6),a,es14.6)") &
-               ' HPR: final separation |a|, Omega = ',norm2(sep),hpr_omega_current,&
-               '  Ekin_corot = ',ekin_corot
          endif
       endif
 

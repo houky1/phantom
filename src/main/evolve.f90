@@ -191,7 +191,7 @@ contains
          if (abortrun) exit
 
          ! Called once, on the step where HPR just declared itself
-         ! finished (see hpr_check_and_apply/hpr_settle_time).
+         ! finished (see hpr_check_and_apply).
          if (hpr_finished) call hpr_restart_accounting(time,dtmax)
 
       enddo timestepping
@@ -411,7 +411,7 @@ contains
 !----------------------------------------------------------------
 !+
 !  called once, when halted-pendulum relaxation has completed
-!  (see hpr_check_and_apply/hpr_settle_time): resets the time origin
+!  (see hpr_check_and_apply): resets the time origin
 !  and step counters so that the "official" physical evolution is
 !  timed from this point, and re-baselines the conservation check
 !  (energy, angular momentum, ...) to the post-relaxation state -- see
