@@ -19,8 +19,8 @@ module analysis
 !
 ! :Runtime parameters: None
 !
-! :Dependencies: centreofmass, analysis_stripping_tools, io, part, physcon,
-!   prompting, readwrite_dumps, units
+! :Dependencies: analysis_stripping_tools, binary_tools, centreofmass, io,
+!   part, physcon, prompting, readwrite_dumps, units
 !
    use io,                only: fatal
    use part,              only: rhoh
@@ -37,6 +37,7 @@ module analysis
       omega_old,&
       correct_sign_evector,&
       get_internal_quadrupole
+   use binary_tools,      only: L1_point, roche_potential, gravitational_potential
 
    implicit none
 
@@ -268,7 +269,7 @@ contains
       write(*,*) "Mean Omega coords = ", omega_mean
       write(*,*) "Mean Omega norm2 = ", norm2(omega_mean)
 
-      call L1_point(2, xyzh, particlemass, npart, L1_projection, L1)
+      call L1_point(2, xyzh, particlemass, npart, evector_old, com, norm2(omega), rmax, L1_projection, L1)
 
       call get_total_angular_momentum(xyzh, vxyzu, npart, L_tot)
 
@@ -329,7 +330,7 @@ contains
       write(iunit,'(es18.10,2x)', advance="no") time
       do i = 1, imax
          p = p1 + (i - 1)*(p2 - p1)/(imax - 1)
-         call roche_potential_wrapper(p, potential)
+         call roche_potential(p, xyzh_, particlemass_, npart_, evector_old, com, norm2(omega_old), potential)
          write(iunit,'(es18.10,1x)', advance="no") potential
       enddo
       write(iunit,'()')
@@ -895,416 +896,11 @@ contains
 
    end function interpolate_potential_lagrange
 !-----------------------------------------------------------------------
-   subroutine gravitational_potential_wrapper(p, potential)
-
-      real, intent (in)  :: p
-      real, intent (out) :: potential
-
-      call gravitational_potential(p, xyzh_, particlemass_, npart_, potential)
-
-   end subroutine gravitational_potential_wrapper
-!-----------------------------------------------------------------------
-   subroutine gravitational_potential(p, xyzh, particlemass, npart, potential)
-
-      real,           intent (in)  :: p
-      integer,        intent (in)  :: npart
-      real,           intent (in)  :: xyzh(4,npart)
-      real,           intent (in)  :: particlemass
-      real,           intent (out) :: potential
-
-      integer                      :: i
-      real(kind=8)                 :: point(3)
-      real(kind=8)                 :: dpoint(3)
-      real(kind=8)                 :: dr ! 1/sqrt(r^2)
-
-      potential = 0.
-
-      point = p*evector_old
-
-!$omp parallel default(none) &
-!$omp shared(npart,xyzh,point) &
-!$omp private(i,dpoint,dr) &
-!$omp reduction(-:potential)
-!$omp do
-      do i = 1, npart
-         dpoint = point - xyzh(1:3,i)
-         dr = 1./norm2(dpoint)
-         potential = potential - dr
-      enddo
-!$omp enddo
-!$omp end parallel
-
-      potential = potential*particlemass
-
-   end subroutine gravitational_potential
-!-----------------------------------------------------------------------
-   subroutine roche_potential_wrapper(p, potential)
-
-      real, intent (in)  :: p
-      real, intent (out) :: potential
-
-      real               :: omega
-
-      omega = norm2(omega_old)
-      call roche_potential(p, xyzh_, particlemass_, npart_, omega, potential)
-
-   end subroutine roche_potential_wrapper
-!-----------------------------------------------------------------------
-   subroutine roche_potential(p, xyzh, particlemass, npart, omega, potential)
-
-      real,    intent (in)  :: p
-      integer, intent (in)  :: npart
-      real,    intent (in)  :: xyzh(4,npart)
-      real,    intent (in)  :: particlemass
-      real,    intent (in)  :: omega
-      real,    intent (out) :: potential
-
-      potential = 0.
-
-      call gravitational_potential(p, xyzh, particlemass, npart, potential)
-
-      potential = potential - 0.5*(omega*omega)*(p*p)
-
-   end subroutine roche_potential
-!-----------------------------------------------------------------------
-   subroutine gravitational_force_wrapper(p, force, dforce)
-
-      real, intent (in)  :: p
-      real, intent (out) :: force
-      real, intent (out) :: dforce
-
-      call gravitational_force(p, xyzh_, particlemass_, npart_, force, dforce)
-
-   end subroutine gravitational_force_wrapper
-!-----------------------------------------------------------------------
-   subroutine gravitational_force(p, xyzh, particlemass, npart, force, dforce)
-
-      real,           intent (in)  :: p
-      integer,        intent (in)  :: npart
-      real,           intent (in)  :: xyzh(4,npart)
-      real,           intent (in)  :: particlemass
-      real,           intent (out) :: force
-      real,           intent (out) :: dforce
-
-      integer                      :: i
-      real(kind=8)                 :: point(3)
-      real(kind=8)                 :: dpoint(3)
-      real(kind=8)                 :: f(3)
-      real(kind=8)                 :: df(6)
-      real(kind=8)                 :: dr  ! 1/sqrt(r^2)
-      real(kind=8)                 :: dr3 ! 1/sqrt(r^2)^3
-      real(kind=8)                 :: dr5 ! 1/sqrt(r^2)^5
-
-      force = 0.
-      dforce = 0.
-
-      f = 0.
-      df = 0.
-
-      point = p*evector_old
-
-      do i = 1, npart
-
-         dpoint = point - xyzh(1:3,i)
-         dr = 1./norm2(dpoint)
-         dr3 = dr*dr*dr
-         dr5 = dr3*dr*dr
-
-         f = f - dpoint*dr3
-
-         ! NB: Check for correctness
-         df(1) = df(1) + dr5*(3.*dpoint(1)*dpoint(1) - 1.) ! dfx/dx
-         df(2) = df(2) + dr5*(3.*dpoint(1)*dpoint(2))      ! dfx/dy = dfy/dx
-         df(3) = df(3) + dr5*(3.*dpoint(1)*dpoint(3))      ! dfx/dz = dfz/dx
-         df(4) = df(4) + dr5*(3.*dpoint(2)*dpoint(2) - 1.) ! dfy/dy
-         df(5) = df(5) + dr5*(3.*dpoint(2)*dpoint(3))      ! dfy/dz = dfz/dy
-         df(6) = df(6) + dr5*(3.*dpoint(3)*dpoint(3) - 1.) ! dfz/dz
-
-      enddo
-
-      force = norm2(f)*particlemass
-      dforce = norm2(df)*particlemass
-
-   end subroutine gravitational_force
-!-----------------------------------------------------------------------
-! Finding the zero of gravitational force by Newton method
-! Due to the noise in the function this method is unsuccessful
-!-----------------------------------------------------------------------
-   subroutine newton_method(p, xyzh, particlemass, pNew, fNew, residual, npart, func)
-
-      real,    intent(in)  :: p
-      integer, intent(in)  :: npart
-      real,    intent(in)  :: xyzh(4,npart)
-      real,    intent(in)  :: particlemass
-      real,    intent(out) :: fNew, residual
-
-      real                 :: pNew, f, df
-
-      interface
-         subroutine func(point, force, dforce)
-            real, intent (in)  :: point
-            real, intent (out) :: force
-            real, intent (out) :: dforce
-         end subroutine func
-      end interface
-
-      ! compute function value evaluated at x
-      call func(p, f, df)
-
-      ! numerical second derivative
-      ! write(*,*) p, f, df
-      ! pNew = p + 1.e-4
-      ! call func(pNew, fNew, df)
-      ! df = (fNew - f)/(pNew - p)
-      ! write(*,*) pNew, f, df
-      ! stop
-
-      ! Exit if f' is near or become zero
-      if(abs(df) < 1.e-12) then
-         print *, '[Error: newton_method] Function derivative becomes very close to zero or zero.'
-         print *, 'f=',f, 'df/dp =',df
-         print *, 'Aborting now in order to avoid division by zero.'
-         stop
-      end if
-
-      ! Algorithm
-      pNew = p - f/df
-      fNew = f
-
-      ! Search fails if a newly updated value x is out of the search domain
-      ! if((pNew < pBeg) .or. (pNew > pEnd)) then
-      !   print *, '[Error: newton_method] pNew',pNew, 'is out of domain.'
-      !   print *, 'Failed in search. Aborting now.'
-      !   stop
-      ! end if
-
-      ! Calculate a new residual
-      residual = abs(pNew - p)
-
-   end subroutine newton_method
-!-----------------------------------------------------------------------
-! The golden-section search is a technique for finding an extremum
-!   (minimum or maximum) of a function inside a specified interval.
-! The implementation is based on the more robust approach described in
-!   V.G. Karmanov Mathematical programming, Moscow: FML, 2008, pp. 134-142.
-!-----------------------------------------------------------------------
-   real function golden_section_search_method(a, b,&
-      eps, err, extr, maxIter, Nest, iter, func)
-
-      real,    intent(in)  :: a, b        ! left and right boundaries
-      ! of the extremum search interval
-      real,    intent(in)  :: eps        ! specified accuracy
-
-      real,    intent(out) :: err        ! achieved accuracy
-      integer, intent(out) :: extr       ! extremum type: 1 - minimum; -1 - maximum
-
-      integer, intent(in)  :: maxIter
-      integer, intent(out) :: iter, Nest ! number of iterations actually made
-      ! and their lower bound
-
-      real                 :: q = 0.5d0*(sqrt(5.0d0)-1.0d0),&
-         alpha, fy0, fz0,&
-         a0, a1, b0, b1, y0,&
-         y1, z0, z1, d0, d1, d2, d3, d10
-      integer              :: nfail
-
-      interface
-         subroutine func(point, potential)
-            real, intent (in)  :: point
-            real, intent (out) :: potential
-         end subroutine func
-      end interface
-
-      golden_section_search_method = 0.
-
-      iter = 1
-      err = 1.0d0
-      nfail = 0
-      Nest = int(log(eps/(b-a))/log(q))
-      alpha = 0.8d0
-
-      fy0 = 0.; fz0 = 0.; a0 = 0.; a1 = 0.; b0 = 0.; b1 = 0.
-      y0 = 0.; y1 = 0.; z0 = 0.; z1 = 0.; d0 = 0.
-      d1 = 0.; d2 = 0.; d3 = 0.; d10 = 0.
-
-      call func(a, fy0)
-      call func(a+eps, fz0)
-      if(fy0 > fz0) then
-         extr = 1         ! looking for a minimum
-      else
-         extr = -1        ! looking for a maximum
-      end if
-! step 1
-      a0 = a
-      b0 = b
-! step 2
-      do
-         d10 = d1
-         d0 = b0-a0
-         d1 = q*d0
-         d2 = d0-d1
-! checking if precision is achieved (algorithm loops)
-         if(abs(d1-d10) <= epsilon(1.0d0) .and. iter > maxIter) then
-            nfail = nfail+1
-! exit after two consecutive non-decreasing precision
-            if(nfail >= 2) then
-               err = d1
-               golden_section_search_method = 0.5d0*(a1+b1)
-               return
-            end if
-         else
-            nfail = 0
-         end if
-
-         y0 = a0+d2
-         z0 = b0-d2
-
-         call func(y0, fy0)
-         call func(z0, fz0)
-! step 3
-         do
-            iter = iter+1
-            d3 = d1-d2
-
-            if(extr*fy0 <= extr*fz0) then
-               a1 = a0
-               b1 = z0
-               z1 = y0
-               y1 = a1+d3
-               fz0 = fy0
-               call func(y1, fy0)
-
-               if(y1 >= z1) then
-                  a0 = a1
-                  b0 = b1
-                  exit   ! to step 2
-               end if
-            else
-               a1 = y0
-               b1 = b0
-               y1 = z0
-               z1 = b1-d3
-               fy0 = fz0
-               call func(z1, fz0)
-
-               if(z1 <= y1) then
-                  a0 = a1
-                  b0 = b1
-                  exit   ! to step 2
-               end if
-
-            end if
-! step 4
-            if(d1 <= eps) then
-               golden_section_search_method = 0.5d0*(a1+b1)
-               err = d1
-               return
-            else
-
-               if(d1 <= alpha*d0) then
-                  a0 = a1
-                  b0 = b1
-                  y0 = y1
-                  z0 = z1
-                  d1 = d2
-                  d2 = d3
-                  cycle ! to step 3
-               else  ! d1 > eps .and. d1 > alpha**d0)
-                  a0 = a1
-                  b0 = b1
-                  exit ! to step 2
-               end if
-
-            end if
-
-         end do
-
-      end do
-
-   end function golden_section_search_method
-!-----------------------------------------------------------------------
-   subroutine L1_point(method, xyzh, particlemass, npart, L1_proj, L1)
-
-      integer, intent(in)  :: method ! 1 - Newton, 2 - Golden Section Search
-      integer, intent(in)  :: npart
-      real,    intent(in)  :: xyzh(4,npart)
-      real,    intent(in)  :: particlemass
-      real,    intent(out) :: L1_proj
-      real,    intent(out) :: L1(3)
-
-      integer              :: nIter
-      integer, parameter   :: maxIter = 50
-      real,    parameter   :: threshold = 1e-7
-
-      ! for Newton's method
-      real                 :: p, pNew, residual, f
-
-      ! for Golden section search method
-      real                 :: p1, p2
-      integer              :: nest, extr
-      real                 :: eps, err
-
-      L1_proj = 0.
-      L1 = 0.
-
-      ! Initial values for number of iteration
-      nIter = 1
-
-      p = 0.
-
-      if(method == 1) then
-         ! Initial values for residual
-         residual = 1.e10
-
-         ! Keep search iteration until
-         ! (a) residual is bigger then a user-defined threshold value, and
-         ! (b) iteration number is less than a user-defined maximum iteration number.
-
-         do while ((residual > threshold) .and. (nIter < maxIter))
-
-            ! Search using conventional Newton's method
-            call newton_method(p, xyzh, particlemass, pNew, f,&
-               residual, npart, gravitational_force_wrapper)
-
-            ! Save for the next search iteration
-            p = pNew
-
-            ! Update iteration number
-            nIter = nIter + 1
-
-            write(*,*) nIter, pNew, residual
-         end do
-
-         L1 = p*evector_old
-         write(*,*) "L1 by Newton's method - ", L1, p
-
-      else
-
-         ! NB: find correct p1 and p2
-         p1 = -3.
-         p2 = 15.
-         eps = threshold
-
-         write(*,*) 'Golden section search method - Interval of extremum: p1=', p1, ' p2=', p2
-         p = golden_section_search_method(p1, p2,&
-            eps, err, extr,&
-            maxIter, Nest, nIter,&
-            roche_potential_wrapper)
-
-         L1 = p*evector_old
-
-         if(extr == 1)  write(*,*) 'Minimum'
-         if(extr == -1) write(*,*) 'Maximum'
-
-         write(*,*) 'Iterations done: ', nIter, ', accuracу achieved is ', err
-         write(*,*) 'L1 by Golden section search method - ', L1, p
-
-      endif
-
-      L1_proj = p
-
-   end subroutine L1_point
-!-----------------------------------------------------------------------
+! gravitational_potential_wrapper, gravitational_potential, roche_potential_wrapper,
+! roche_potential, gravitational_force_wrapper, gravitational_force, newton_method,
+! golden_section_search_method and L1_point used to be defined here as local copies.
+! They now live in binary_tools (shared with halted_pendulum_tools) -- see the
+! 'use binary_tools' at the top of this module.
    subroutine analyse_inertia(dumpfile,xyzh,vxyzu,time,npart,density_cutoff,iunit,particlemass)
 
       use dim,          only: maxp, maxvxyzu
@@ -1381,7 +977,7 @@ contains
       call correct_sign_evector(evectors(:, smallIIndex), evector_old)
       evector_old = evectors(:, smallIIndex)
 
-      call L1_point(2, xyzh, particlemass, npart, L1_projection, L1)
+      call L1_point(2, xyzh, particlemass, npart, evector_old, com, norm2(omega_old), rmax, L1_projection, L1)
 
       iA = 1
       iB = 1
@@ -1513,7 +1109,7 @@ contains
       call correct_sign_evector(evectors(:, smallIIndex), evector_old)
       evector_old = evectors(:, smallIIndex)
       !Finding L1
-      call L1_point(2, xyzh, particlemass, npart, L1_projection, L1)
+      call L1_point(2, xyzh, particlemass, npart, evector_old, com, norm2(omega_old), rmax, L1_projection, L1)
 
       iA = 1
       iB = 1
