@@ -39,8 +39,6 @@ module halted_pendulum_relaxation
    real, save :: evector_old(3) = (/1.,0.,0./)
    logical, save :: hpr_first_call = .true.
    logical, save :: hpr_initialized = .false.
-   real,    save, private :: hpr_time_last_halt = 0.
-   logical, save, private :: hpr_finished_latched = .false.
    private
 
 contains
@@ -75,13 +73,11 @@ contains
       hpr_napplied       = 0
       evector_old        = (/1.,0.,0./)
       hpr_first_call     = .true.
-      hpr_time_last_halt = 0.
-      hpr_finished_latched = .false.
       hpr_initialized = .true.
 
    end subroutine hpr_init
 
-   subroutine hpr_check_and_apply(npart,xyzh,vxyzu,massoftype,t,applied,finished)
+   subroutine hpr_check_and_apply(npart,xyzh,vxyzu,massoftype,t,applied)
       use io,                        only:id,master,iprint
       use options,                   only:use_hpr,hpr_nfit,hpr_ekin_tol
       use part,                      only:igas
@@ -94,7 +90,6 @@ contains
       real,    intent(in)    :: massoftype(:)
       real,    intent(in)    :: t
       logical, intent(out)   :: applied
-      logical, intent(out)   :: finished
 
       real :: com(3),vcom(3)
       real :: inertia(3,3),principle(3),evectors(3,3),rmax
@@ -110,13 +105,11 @@ contains
 
 
       applied  = .false.
-      finished = .false.
       if (.not.use_hpr) return
 
       if (hpr_first_call) then
          if (id==master) write(iprint,"(a,i0,a)") &
             ' HPR: monitoring corotating-frame kinetic energy, window = ',hpr_nfit,' samples'
-         hpr_time_last_halt = t
          hpr_first_call = .false.
       endif
 
