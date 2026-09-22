@@ -39,6 +39,7 @@ module evolve
    logical         :: abortrun_bdy,use_global_dt
    integer(kind=8) :: nmovedtot,nalivetot
    integer(kind=1) :: nbinmaxprev
+   integer         :: hpr_csv_unit = 0
 
 contains
 
@@ -50,7 +51,6 @@ contains
 !+
 !----------------------------------------------------------------
    subroutine evol_init(time,dtmax,rhomaxnow,dt)
-      use io,             only:iprint
       use checkconserved, only:init_conservation_checks
       use part,           only:npart
       use ptmass,         only:set_integration_precision
@@ -92,8 +92,6 @@ contains
       tcpustart = tcpulast
 
       call setup_timers
-      call flush(iprint)
-
       initialized = .true.
 
    end subroutine evol_init
@@ -133,9 +131,23 @@ contains
 
 
 
-      if (use_hpr .and. first_call .and. id == master) then
-         write(iprint,"(a)") ' halted-pendulum relaxation hook enabled'
-         first_call = .false.
+      if (use_hpr .and. id == master) then
+         if (first_call) then
+            write(iprint,"(a)") ' halted-pendulum relaxation hook enabled; diagnostics: hpr_diagnostics.csv'
+            first_call = .false.
+         endif
+
+         if (hpr_csv_unit == 0) then
+            open(newunit=hpr_csv_unit,file="hpr_diagnostics.csv",status="replace",action="write")
+            write(hpr_csv_unit,"(a)") &
+            "time,time_seconds,time_years,npart,ekin_corot,ekin_total,omega,com_x,com_y,com_z,vcom_x,vcom_y,vcom_z,"// &
+            "inertia_xx,inertia_xy,inertia_xz,inertia_yx,inertia_yy,inertia_yz,inertia_zx,inertia_zy,inertia_zz,"// &
+            "principle_1,principle_2,principle_3,evector_x,evector_y,evector_z,rmax,"// &
+            "l1_x,l1_y,l1_z,l1_projection,star1_mass,star2_mass,star1_com_x,star1_com_y,star1_com_z,"// &
+            "star2_com_x,star2_com_y,star2_com_z,separation_x,separation_y,separation_z,"// &
+            "separation_norm,fit_aa,fit_bb,fit_cc,tmax,"// &
+            "buffer_size,omega_samples,hpr_napplied,applied"
+         endif
       endif
 
       ! the following isrequired because evol is called multiple times in AMUSE... -SR
@@ -164,7 +176,7 @@ contains
          call step(npart,nactive,time,dt,dtextforce,dtnew)
 
          if (use_hpr) then
-            call hpr_check_and_apply(npart, xyzh, vxyzu, massoftype, time+dt, hpr_applied)
+            call hpr_check_and_apply(npart, xyzh, vxyzu, massoftype, time+dt, hpr_applied, hpr_csv_unit)
             if (hpr_applied) then
                call get_derivs_global()
                call compute_energies(time+dt)

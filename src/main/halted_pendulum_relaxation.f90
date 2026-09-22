@@ -70,19 +70,23 @@ contains
       hpr_sep_t = 0.
       hpr_nsep = 0
       hpr_omega_current = 0.
+      hpr_omega_previous = 0.
       hpr_napplied       = 0
       evector_old        = (/1.,0.,0./)
+
       hpr_first_call     = .true.
       hpr_initialized = .true.
 
    end subroutine hpr_init
 
-   subroutine hpr_check_and_apply(npart,xyzh,vxyzu,massoftype,t,applied)
+   subroutine hpr_check_and_apply(npart,xyzh,vxyzu,massoftype,t,applied,csv_unit)
       use io,                        only:id,master,iprint
       use options,                   only:use_hpr,hpr_nfit,hpr_ekin_tol
       use part,                      only:igas
       use centreofmass,              only:get_centreofmass
       use halted_pendulum_tools,     only:get_momentofinertia,correct_sign_evector,L1_point
+      use physcon,                   only: years
+      use units,                     only: utime
 
       integer, intent(in)    :: npart
       real,    intent(inout) :: xyzh(:,:)
@@ -90,21 +94,29 @@ contains
       real,    intent(in)    :: massoftype(:)
       real,    intent(in)    :: t
       logical, intent(out)   :: applied
+      integer, intent(in)    :: csv_unit
 
       real :: com(3),vcom(3)
       real :: inertia(3,3),principle(3),evectors(3,3),rmax
       integer :: npartused,smallIIndex
       real :: density_cutoff,particlemass
-      real :: sep(3),omega_vec(3)
+      real :: sep(3),omega_vec(3),sep_norm
       real :: L1(3),L1_projection
       real :: com1(3),m1,com2(3),m2
       real :: ekin_corot,ekin_total
       real :: aa,bb,cc,tmax
+      real(kind=8) :: time_seconds, time_years
       logical :: has_maximum
       integer :: i0,i1
 
 
       applied  = .false.
+      aa = 0.
+      bb = 0.
+      cc = 0.
+      tmax = 0.
+      time_seconds = real(t, kind=8) * utime
+      time_years   = time_seconds / years
       if (.not.use_hpr) return
 
       if (hpr_first_call) then
@@ -134,6 +146,7 @@ contains
       ! Split into the two stars using the L1 point just found.
       call split_by_axis(npart, xyzh, massoftype, evector_old, L1_projection, com1, m1, com2, m2)
       sep = com1 - com2
+      sep_norm = sqrt(sum(sep**2))
 
       call update_omega_estimate(sep(1),sep(2),t)
       omega_vec = (/0.,0.,hpr_omega_current/)
@@ -163,6 +176,14 @@ contains
                endif
             endif
          endif
+      endif
+      if (id == master .and. csv_unit /= 0) then
+         write(csv_unit,'(*(g0,:,","))') &
+            t,time_seconds,time_years,npart,ekin_corot,ekin_total, &
+            hpr_omega_current,com,vcom,inertia,principle,evectors(:,smallIIndex), &
+            rmax,L1,L1_projection,m1,m2,com1,com2,sep,sep_norm, &
+            aa,bb,cc,tmax,hpr_nbuf,hpr_nsep,hpr_napplied,applied
+         flush(csv_unit)
       endif
 
    end subroutine hpr_check_and_apply
