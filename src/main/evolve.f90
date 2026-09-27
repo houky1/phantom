@@ -140,13 +140,16 @@ contains
          if (hpr_csv_unit == 0) then
             open(newunit=hpr_csv_unit,file="hpr_diagnostics.csv",status="replace",action="write")
             write(hpr_csv_unit,"(a)") &
-            "time,time_seconds,time_years,npart,ekin_corot,ekin_total,omega,com_x,com_y,com_z,vcom_x,vcom_y,vcom_z,"// &
-            "inertia_xx,inertia_xy,inertia_xz,inertia_yx,inertia_yy,inertia_yz,inertia_zx,inertia_zy,inertia_zz,"// &
-            "principle_1,principle_2,principle_3,evector_x,evector_y,evector_z,rmax,"// &
-            "l1_x,l1_y,l1_z,l1_projection,star1_mass,star2_mass,star1_com_x,star1_com_y,star1_com_z,"// &
-            "star2_com_x,star2_com_y,star2_com_z,separation_x,separation_y,separation_z,"// &
-            "separation_norm,fit_aa,fit_bb,fit_cc,tmax,"// &
-            "buffer_size,omega_samples,hpr_napplied,applied"
+               "time,time_seconds,time_years,npart,ekin_corot,ekin_total,"// &
+               "omega,com_x,com_y,com_z,vcom_x,vcom_y,vcom_z,"// &
+               "inertia_xx,inertia_xy,inertia_xz,inertia_yx,inertia_yy,inertia_yz,inertia_zx,inertia_zy,inertia_zz,"// &
+               "principle_1,principle_2,principle_3,evector_x,evector_y,evector_z,rmax,"// &
+               "l1_x,l1_y,l1_z,l1_projection,star1_mass,star2_mass,star1_com_x,star1_com_y,star1_com_z,"// &
+               "star2_com_x,star2_com_y,star2_com_z,separation_x,separation_y,separation_z,"// &
+               "separation_norm,fit_aa,fit_bb,fit_cc,tmax,"// &
+               "buffer_size,omega_samples,hpr_napplied,applied,"// &
+               "q1_xx,q1_yy,q1_zz,q1_xy,q1_xz,q1_yz," // &
+               "q2_xx,q2_yy,q2_zz,q2_xy,q2_xz,q2_yz"
          endif
       endif
 

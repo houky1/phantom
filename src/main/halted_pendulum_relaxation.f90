@@ -108,7 +108,7 @@ contains
       real(kind=8) :: time_seconds, time_years
       logical :: has_maximum
       integer :: i0,i1
-
+      real :: q1(6),q2(6)
 
       applied  = .false.
       aa = 0.
@@ -128,14 +128,14 @@ contains
       particlemass   = massoftype(igas)
       density_cutoff = 0.
 
-      ! system centre of mass -- required INPUT to get_momentofinertia
-      ! (and to the L1 search below), not something it computes
+      ! system center of mass
       call get_centreofmass(com, vcom, npart, xyzh, vxyzu)
 
       ! Calculate the tensor inertia and evectors
       call get_momentofinertia(xyzh, vxyzu, com, vcom, npart, density_cutoff, particlemass,&
          npartused, inertia, principle, evectors, rmax)
       smallIIndex = minloc(principle, dim=1)
+
       !Correct sign of evector
       call correct_sign_evector(evectors(:, smallIIndex), evector_old)
       evector_old = evectors(:, smallIIndex)
@@ -145,6 +145,8 @@ contains
 
       ! Split into the two stars using the L1 point just found.
       call split_by_axis(npart, xyzh, massoftype, evector_old, L1_projection, com1, m1, com2, m2)
+
+      call get_quadrupole_moments(npart, xyzh, massoftype, evector_old, L1_projection, com1, com2, q1, q2)
       sep = com1 - com2
       sep_norm = sqrt(sum(sep**2))
 
@@ -182,7 +184,9 @@ contains
             t,time_seconds,time_years,npart,ekin_corot,ekin_total, &
             hpr_omega_current,com,vcom,inertia,principle,evectors(:,smallIIndex), &
             rmax,L1,L1_projection,m1,m2,com1,com2,sep,sep_norm, &
-            aa,bb,cc,tmax,hpr_nbuf,hpr_nsep,hpr_napplied,applied
+            aa,bb,cc,tmax,hpr_nbuf,hpr_nsep,hpr_napplied,applied, &
+            q1(1),q1(2),q1(3),q1(4),q1(5),q1(6), &
+            q2(1),q2(2),q2(3),q2(4),q2(5),q2(6)
          flush(csv_unit)
       endif
 
@@ -244,7 +248,6 @@ contains
 
       if (nvalid > 0) then
          omega_raw = omega_sum/real(nvalid)
-
          ! Smooth the omega estimate using exponential moving average
          if (hpr_omega_previous == 0.) then
             hpr_omega_current = omega_raw
@@ -411,7 +414,57 @@ contains
       if (m2 > 0.) com2 = com2/m2
 
    end subroutine split_by_axis
+!----------------------------------------------------------------
+!+
+!  Calculate quadrupole moments for both stars
+!+
+!----------------------------------------------------------------
+   subroutine get_quadrupole_moments(npart,xyzh,massoftype,axis,threshold,com1,com2,q1,q2)
+      use part,     only:iamtype,iphase,isdead_or_accreted
+      use mpiutils, only:reduceall_mpi
+      integer, intent(in)  :: npart
+      real,    intent(in)  :: xyzh(:,:),massoftype(:)
+      real,    intent(in)  :: axis(3),threshold
+      real,    intent(in)  :: com1(3),com2(3)       ! Centers of mass
+      real,    intent(out) :: q1(6),q2(6)           ! Quadrupole tensors (xx,yy,zz,xy,xz,yz)
+      integer :: i, k
+      real    :: mi, dx(3), r2, qloc(6)
+      real    :: q1_send(6),q2_send(6)               ! Local accumulation buffers
 
+      q1_send = 0.; q2_send = 0.
+      do i=1,npart
+         if (isdead_or_accreted(xyzh(4,i))) cycle
+         mi = massoftype(iamtype(iphase(i)))
+
+         ! Determine which star this particle belongs to
+         if (dot_product(xyzh(1:3,i),axis) >= threshold) then
+            dx = xyzh(1:3,i) - com1
+         else
+            dx = xyzh(1:3,i) - com2
+         endif
+
+         r2 = sum(dx**2)
+         ! Symmetric trace-free quadrupole moment components scaled by 3 for convenience
+         qloc(1) = mi * (3.*dx(1)*dx(1) - r2)
+         qloc(2) = mi * (3.*dx(2)*dx(2) - r2)
+         qloc(3) = mi * (3.*dx(3)*dx(3) - r2)
+         qloc(4) = mi * 3.*dx(1)*dx(2)
+         qloc(5) = mi * 3.*dx(1)*dx(3)
+         qloc(6) = mi * 3.*dx(2)*dx(3)
+
+         if (dot_product(xyzh(1:3,i),axis) >= threshold) then
+            q1_send = q1_send + qloc
+         else
+            q2_send = q2_send + qloc
+         endif
+      enddo
+
+      ! MPI reduction for each component
+      do k=1,6
+         q1(k) = reduceall_mpi('+', q1_send(k))
+         q2(k) = reduceall_mpi('+', q2_send(k))
+      enddo
+   end subroutine get_quadrupole_moments
 !----------------------------------------------------------------
 !+
 !  least-squares quadratic fit y = aa*dx**2 + bb*dx + cc, where
