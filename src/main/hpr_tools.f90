@@ -23,7 +23,8 @@ module halted_pendulum_tools
 !
 ! :Dependencies: binary_tools, centreofmass, dump_utils, infile_utils, io, physcon, units
 !
-   use binary_tools, only: get_momentofinertia, correct_sign_evector, L1_point
+   use binary_tools, only: get_momentofinertia, correct_sign_evector, L1_point, &
+      get_spin_angular_velocities, get_quadrupole_moments
 
    implicit none
 
@@ -44,7 +45,7 @@ module halted_pendulum_tools
    !
    ! subroutines (re-exported from binary_tools)
    !
-   public :: get_momentofinertia, correct_sign_evector, L1_point
+   public :: get_momentofinertia, correct_sign_evector, L1_point, get_spin_angular_velocities, get_quadrupole_moments
    private
 
 end module halted_pendulum_tools

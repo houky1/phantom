@@ -84,7 +84,8 @@ contains
       use options,                   only:use_hpr,hpr_nfit,hpr_ekin_tol
       use part,                      only:igas
       use centreofmass,              only:get_centreofmass
-      use halted_pendulum_tools,     only:get_momentofinertia,correct_sign_evector,L1_point
+      use halted_pendulum_tools,     only:get_momentofinertia,correct_sign_evector,L1_point,&
+         get_spin_angular_velocities, get_quadrupole_moments
       use physcon,                   only: years
       use units,                     only: utime
 
@@ -296,132 +297,6 @@ contains
       if (w > pi) w = w - two_pi
 
    end function wrap_angle
-!----------------------------------------------------------------
-!+
-!  compute spin angular velocities, spin angular momenta, stellar
-!  COM velocities and orbital angular momentum for both stars.
-!  Particles are assigned to star 1/2 by projecting their positions
-!  onto axis and comparing with threshold.
-!  omega_spin = I^{-1} * L_spin
-!+
-!----------------------------------------------------------------
-   subroutine get_spin_angular_velocities(npart,xyzh,vxyzu,massoftype,axis, &
-      threshold,com1,m1,com2,m2,com_total,vcom_total, &
-      omega_spin1,omega_spin2,L_spin1,L_spin2, &
-      vcom1,vcom2,L_spin_system,L_total)
-      use part,        only:iamtype,iphase,isdead_or_accreted
-      use mpiutils,    only:reduceall_mpi
-      use vectorutils, only:cross_product3D,matrixinvert3D
-      integer, intent(in)  :: npart
-      real,    intent(in)  :: xyzh(:,:),vxyzu(:,:),massoftype(:)
-      real,    intent(in)  :: axis(3),threshold
-      real,    intent(in)  :: com1(3),m1,com2(3),m2
-      real,    intent(in)  :: com_total(3),vcom_total(3)
-      real,    intent(out) :: omega_spin1(3),omega_spin2(3)
-      real,    intent(out) :: L_spin1(3),L_spin2(3)
-      real,    intent(out) :: vcom1(3),vcom2(3)
-      real,    intent(out) :: L_spin_system(3),L_total(3)
-      integer :: i,j,k
-      real    :: mi,dr(3),L_tmp(3),drc(3),dvc(3)
-      real    :: I1(3,3),I2(3,3),Iinv(3,3)
-      integer :: ierr
-      real    :: L1_send(3),L2_send(3)
-      real    :: v1_send(3),v2_send(3)
-      real    :: I1_send(3,3),I2_send(3,3)
-
-      L1_send = 0.; L2_send = 0.
-      v1_send = 0.; v2_send = 0.
-      I1_send = 0.; I2_send = 0.
-
-      do i=1,npart
-         if (isdead_or_accreted(xyzh(4,i))) cycle
-         mi = massoftype(iamtype(iphase(i)))
-
-         if (dot_product(xyzh(1:3,i),axis) >= threshold) then
-            dr = xyzh(1:3,i) - com1
-            call cross_product3D(dr, vxyzu(1:3,i), L_tmp)
-            L1_send = L1_send + mi*L_tmp
-            v1_send = v1_send + mi*vxyzu(1:3,i)
-            I1_send(1,1) = I1_send(1,1) + mi*(dr(2)**2 + dr(3)**2)
-            I1_send(2,2) = I1_send(2,2) + mi*(dr(1)**2 + dr(3)**2)
-            I1_send(3,3) = I1_send(3,3) + mi*(dr(1)**2 + dr(2)**2)
-            I1_send(1,2) = I1_send(1,2) - mi*dr(1)*dr(2)
-            I1_send(1,3) = I1_send(1,3) - mi*dr(1)*dr(3)
-            I1_send(2,3) = I1_send(2,3) - mi*dr(2)*dr(3)
-         else
-            dr = xyzh(1:3,i) - com2
-            call cross_product3D(dr, vxyzu(1:3,i), L_tmp)
-            L2_send = L2_send + mi*L_tmp
-            v2_send = v2_send + mi*vxyzu(1:3,i)
-            I2_send(1,1) = I2_send(1,1) + mi*(dr(2)**2 + dr(3)**2)
-            I2_send(2,2) = I2_send(2,2) + mi*(dr(1)**2 + dr(3)**2)
-            I2_send(3,3) = I2_send(3,3) + mi*(dr(1)**2 + dr(2)**2)
-            I2_send(1,2) = I2_send(1,2) - mi*dr(1)*dr(2)
-            I2_send(1,3) = I2_send(1,3) - mi*dr(1)*dr(3)
-            I2_send(2,3) = I2_send(2,3) - mi*dr(2)*dr(3)
-         endif
-      enddo
-
-      ! MPI reduction for spin angular momenta and COM velocities
-      do k=1,3
-         L_spin1(k) = reduceall_mpi('+', L1_send(k))
-         L_spin2(k) = reduceall_mpi('+', L2_send(k))
-      enddo
-      vcom1 = 0.; vcom2 = 0.
-      if (m1 > 0.) then
-         do k=1,3
-            vcom1(k) = reduceall_mpi('+', v1_send(k)) / m1
-         enddo
-      endif
-      if (m2 > 0.) then
-         do k=1,3
-            vcom2(k) = reduceall_mpi('+', v2_send(k)) / m2
-         enddo
-      endif
-
-      ! Symmetrise and MPI-reduce the inertia tensors
-      I1_send(2,1) = I1_send(1,2)
-      I1_send(3,1) = I1_send(1,3)
-      I1_send(3,2) = I1_send(2,3)
-      I2_send(2,1) = I2_send(1,2)
-      I2_send(3,1) = I2_send(1,3)
-      I2_send(3,2) = I2_send(2,3)
-      I1 = 0.; I2 = 0.
-      do j=1,3
-         do k=1,3
-            I1(j,k) = reduceall_mpi('+', I1_send(j,k))
-            I2(j,k) = reduceall_mpi('+', I2_send(j,k))
-         enddo
-      enddo
-
-      ! omega_spin = I^{-1} * L_spin
-      call matrixinvert3D(I1, Iinv, ierr)
-      if (ierr == 0) then
-         omega_spin1 = matmul(Iinv, L_spin1)
-      else
-         omega_spin1 = 0.
-      endif
-
-      call matrixinvert3D(I2, Iinv, ierr)
-      if (ierr == 0) then
-         omega_spin2 = matmul(Iinv, L_spin2)
-      else
-         omega_spin2 = 0.
-      endif
-
-      ! orbital angular momentum: L_orb = sum_i m_i * (R_i - R_com) x (V_i - V_com)
-      drc = com1 - com_total
-      dvc = vcom1 - vcom_total
-      call cross_product3D(drc, dvc, L_tmp)
-      L_spin_system = m1 * L_tmp
-      drc = com2 - com_total
-      dvc = vcom2 - vcom_total
-      call cross_product3D(drc, dvc, L_tmp)
-      L_spin_system = L_spin_system + m2 * L_tmp
-
-      L_total = L_spin1 + L_spin2 + L_spin_system
-
-   end subroutine get_spin_angular_velocities
 
 !----------------------------------------------------------------
 !+
@@ -548,57 +423,6 @@ contains
       if (m2 > 0.) com2 = com2/m2
 
    end subroutine split_by_axis
-!----------------------------------------------------------------
-!+
-!  Calculate quadrupole moments for both stars
-!+
-!----------------------------------------------------------------
-   subroutine get_quadrupole_moments(npart,xyzh,massoftype,axis,threshold,com1,com2,q1,q2)
-      use part,     only:iamtype,iphase,isdead_or_accreted
-      use mpiutils, only:reduceall_mpi
-      integer, intent(in)  :: npart
-      real,    intent(in)  :: xyzh(:,:),massoftype(:)
-      real,    intent(in)  :: axis(3),threshold
-      real,    intent(in)  :: com1(3),com2(3)       ! Centers of mass
-      real,    intent(out) :: q1(6),q2(6)           ! Quadrupole tensors (xx,yy,zz,xy,xz,yz)
-      integer :: i, k
-      real    :: mi, dx(3), r2, qloc(6)
-      real    :: q1_send(6),q2_send(6)               ! Local accumulation buffers
-
-      q1_send = 0.; q2_send = 0.
-      do i=1,npart
-         if (isdead_or_accreted(xyzh(4,i))) cycle
-         mi = massoftype(iamtype(iphase(i)))
-
-         ! Determine which star this particle belongs to
-         if (dot_product(xyzh(1:3,i),axis) >= threshold) then
-            dx = xyzh(1:3,i) - com1
-         else
-            dx = xyzh(1:3,i) - com2
-         endif
-
-         r2 = sum(dx**2)
-         ! Symmetric trace-free quadrupole moment components scaled by 3 for convenience
-         qloc(1) = mi * (3.*dx(1)*dx(1) - r2)
-         qloc(2) = mi * (3.*dx(2)*dx(2) - r2)
-         qloc(3) = mi * (3.*dx(3)*dx(3) - r2)
-         qloc(4) = mi * 3.*dx(1)*dx(2)
-         qloc(5) = mi * 3.*dx(1)*dx(3)
-         qloc(6) = mi * 3.*dx(2)*dx(3)
-
-         if (dot_product(xyzh(1:3,i),axis) >= threshold) then
-            q1_send = q1_send + qloc
-         else
-            q2_send = q2_send + qloc
-         endif
-      enddo
-
-      ! MPI reduction for each component
-      do k=1,6
-         q1(k) = reduceall_mpi('+', q1_send(k))
-         q2(k) = reduceall_mpi('+', q2_send(k))
-      enddo
-   end subroutine get_quadrupole_moments
 !----------------------------------------------------------------
 !+
 !  least-squares quadratic fit y = aa*dx**2 + bb*dx + cc, where
