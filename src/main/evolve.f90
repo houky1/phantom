@@ -141,13 +141,21 @@ contains
             open(newunit=hpr_csv_unit,file="hpr_diagnostics.csv",status="replace",action="write")
             write(hpr_csv_unit,"(a)") &
                "time,time_seconds,time_years,npart,ekin_corot,ekin_total,"// &
-               "omega,com_x,com_y,com_z,vcom_x,vcom_y,vcom_z,"// &
+               "omega,omega_spin1_x,omega_spin1_y,omega_spin1_z,"// &
+               "omega_spin2_x,omega_spin2_y,omega_spin2_z,"// &
+               "com_x,com_y,com_z,vcom_x,vcom_y,vcom_z,"// &
                "inertia_xx,inertia_xy,inertia_xz,inertia_yx,inertia_yy,inertia_yz,inertia_zx,inertia_zy,inertia_zz,"// &
                "principle_1,principle_2,principle_3,evector_x,evector_y,evector_z,rmax,"// &
                "l1_x,l1_y,l1_z,l1_projection,star1_mass,star2_mass,star1_com_x,star1_com_y,star1_com_z,"// &
                "star2_com_x,star2_com_y,star2_com_z,separation_x,separation_y,separation_z,"// &
                "separation_norm,fit_aa,fit_bb,fit_cc,tmax,"// &
                "buffer_size,omega_samples,hpr_napplied,applied,"// &
+               "L_spin1_x,L_spin1_y,L_spin1_z," // &
+               "L_spin2_x,L_spin2_y,L_spin2_z," // &
+               "L_spin_system_x,L_spin_system_y,L_spin_system_z," // &
+               "L_total_x,L_total_y,L_total_z," // &
+               "vcom1_x,vcom1_y,vcom1_z," // &
+               "vcom2_x,vcom2_y,vcom2_z," // &
                "q1_xx,q1_yy,q1_zz,q1_xy,q1_xz,q1_yz," // &
                "q2_xx,q2_yy,q2_zz,q2_xy,q2_xz,q2_yz"
          endif
