@@ -59,7 +59,7 @@ subroutine setpart(id,npart,npartoftype,xyzh,massoftype,vxyzu,polyk,gamma,hfact,
  use velfield,     only:set_velfield_from_cubes
  use setup_params, only:rmax,rhozero,npart_total
  use spherical,    only:set_sphere
- use part,         only:igas,set_particle_type
+ use part,         only:igas,set_particle_type,rho,init_rho_from_h
  use io,           only:fatal,master,iprint
  use units,        only:umass,udist,utime,set_units
  use setvfield,    only:normalise_vfield
@@ -78,15 +78,15 @@ subroutine setpart(id,npart,npartoftype,xyzh,massoftype,vxyzu,polyk,gamma,hfact,
  use infile_utils, only:get_options,infile_exists
  use systemutils,  only:get_command_option
  use utils_shuffleparticles, only:shuffleparticles
- integer,           intent(in)    :: id
- integer,           intent(out)   :: npart
- integer,           intent(out)   :: npartoftype(:)
- real,              intent(out)   :: xyzh(:,:)
- real,              intent(out)   :: polyk,gamma,hfact
- real,              intent(out)   :: vxyzu(:,:)
- real,              intent(out)   :: massoftype(:)
- real,              intent(inout) :: time
- character(len=20), intent(in)    :: fileprefix
+ integer,          intent(in)    :: id
+ integer,          intent(out)   :: npart
+ integer,          intent(out)   :: npartoftype(:)
+ real,             intent(out)   :: xyzh(:,:)
+ real,             intent(out)   :: polyk,gamma,hfact
+ real,             intent(out)   :: vxyzu(:,:)
+ real,             intent(out)   :: massoftype(:)
+ real,             intent(inout) :: time
+ character(len=*), intent(in)    :: fileprefix
  integer                      :: i,ierr
  real                         :: r2,totmass,epotgrav,t_ff,psep
  character(len=20), parameter :: filevx = 'cube_v1.dat'
@@ -140,7 +140,7 @@ subroutine setpart(id,npart,npartoftype,xyzh,massoftype,vxyzu,polyk,gamma,hfact,
  enddo
 
  if (relax) then
-    call shuffleparticles(iprint,npart,xyzh,massoftype(1),rsphere=rmax,dsphere=rhozero,dmedium=0.,&
+    call shuffleparticles(iprint,npart,xyzh,massoftype(1),rho,rsphere=rmax,dsphere=rhozero,dmedium=0.,&
                           is_setup=.true.,prefix=trim(fileprefix))
  endif
  !--Set velocities (from pre-made velocity cubes)
@@ -154,6 +154,7 @@ subroutine setpart(id,npart,npartoftype,xyzh,massoftype,vxyzu,polyk,gamma,hfact,
  if (ierr /= 0) call fatal('setup','error setting up velocity field')
 
  !--Normalise the energy
+ call init_rho_from_h()
  call normalise_vfield(npart,vxyzu,ierr,ke=epotgrav)
  if (ierr /= 0) call fatal('setup','error normalising velocity field')
 

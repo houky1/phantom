@@ -52,7 +52,6 @@ subroutine test_setstar(ntests,npass)
  ! test red supergiant
  call test_redsupergiant(ntests,npass)
 
-
  ! test white dwarf
  call test_whitedwarf(ntests,npass)
 
@@ -214,7 +213,7 @@ subroutine test_redsupergiant(ntests,npass)
  use dim,       only:do_radiation
  use datafiles, only:find_phantom_datafile
  use part,      only:init_part,npart,npartoftype,xyzh,vxyzu,eos_vars,rad,massoftype,hfact,&
-                     xyzmh_ptmass,vxyz_ptmass,nptmass,rhoh,igas,igasP,imu,iX,iZ,iradxi,&
+                     xyzmh_ptmass,vxyz_ptmass,nptmass,rho,igas,igasP,imu,iX,iZ,iradxi,&
                      eos_vars,itemp
  use mpidomain, only:i_belong
  use options,   only:ieos
@@ -325,7 +324,7 @@ subroutine test_redsupergiant(ntests,npass)
     rmserr_Z = 0.
     do j=1,npart
        rj = sqrt(dot_product(xyzh(1:3,j),xyzh(1:3,j)))
-       rhoj = rhoh(xyzh(4,j),massoftype(igas))
+       rhoj = rho(j)
        rhoj_mesa = yinterp(den,r,rj)
        rmserr = rmserr + (1-rhoj/rhoj_mesa)**2
 
@@ -364,11 +363,9 @@ subroutine test_redsupergiant(ntests,npass)
 
 end subroutine test_redsupergiant
 
-
-
 !-----------------------------------------------------------------------
 !+
-!   test that we can successfully relax a white dwarf with the 
+!   test that we can successfully relax a white dwarf with the
 !   zero temperature EoS and Helmholtz eos(Ali Pourmand, similar to test_redsupergiant)
 !+
 !-----------------------------------------------------------------------
@@ -377,7 +374,7 @@ subroutine test_whitedwarf(ntests,npass)
  use dim,       only:do_radiation
  use datafiles, only:find_phantom_datafile
  use part,      only:init_part,npart,npartoftype,xyzh,vxyzu,eos_vars,rad,massoftype,hfact,&
-                     xyzmh_ptmass,vxyz_ptmass,nptmass,rhoh,igas,&
+                     xyzmh_ptmass,vxyz_ptmass,nptmass,rho,igas,&
                      eos_vars
  use mpidomain, only:i_belong
  use options,   only:ieos
@@ -448,14 +445,13 @@ subroutine test_whitedwarf(ntests,npass)
                rhozero=rhozero,npart_total=ntot,mask=i_belong,ierr=ierr,&
                write_files=.false.,density_error=rmserr,energy_error=ekin)
 
-  
     call checkval(ierr,expected_error,0,nfail(1),'set_star runs with expected ierr')
     call update_test_scores(ntests,nfail,npass)
 
     call check_setup(nerror,nwarn,restart=.false.)
     call checkval(nerror+nwarn,0,0,nfail(1),'no errors or warnings')
     call update_test_scores(ntests,nfail,npass)
-   
+
     call checkval(rmserr,0.0,0.05,nfail(1),'error in density profile')
     call update_test_scores(ntests,nfail,npass)
 
@@ -465,7 +461,7 @@ subroutine test_whitedwarf(ntests,npass)
     rmserr = 0.
     do j=1,npart
        rj = sqrt(dot_product(xyzh(1:3,j),xyzh(1:3,j)))
-       rhoj = rhoh(xyzh(4,j),massoftype(igas))
+       rhoj = rho(j)
        rhoj_mesa = yinterp(den,r,rj)
        rmserr = rmserr + (1-rhoj/rhoj_mesa)**2
 
@@ -477,7 +473,5 @@ subroutine test_whitedwarf(ntests,npass)
  enddo
 
 end subroutine test_whitedwarf
-
-
 
 end module testsetstar

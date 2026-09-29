@@ -41,6 +41,9 @@ module options
 ! additional .ev data
    logical, public :: calc_erot
 
+! if true, use a distinct (flatter) kernel to set h from number density
+ logical, public :: two_kernel
+
 ! dust method
    logical, public :: use_dustfrac, use_hybrid, use_porosity
 
@@ -93,15 +96,16 @@ contains
       ! Reset units
       call set_units()
 
-      ! Miscellaneous parameters
-      hfact     = hfact_default   ! smoothing length in units of average particle spacing
-      tolh      = 1.e-4           ! tolerance on h iterations
-      Bextx     = 0.              ! external magnetic field
-      Bexty     = 0.
-      Bextz     = 0.
-      iexternalforce = 0          ! external forces
-      if (gr) iexternalforce = 1
-      calc_erot = .false.         ! To allow rotational energies to be printed to .ev
+ ! Miscellaneous parameters
+ hfact     = hfact_default   ! smoothing length in units of average particle spacing
+ tolh      = 1.e-4           ! tolerance on h iterations
+ Bextx     = 0.              ! external magnetic field
+ Bexty     = 0.
+ Bextz     = 0.
+ iexternalforce = 0          ! external forces
+ if (gr) iexternalforce = 1
+ calc_erot = .false.         ! To allow rotational energies to be printed to .ev
+ two_kernel = .false.        ! use a flatter kernel to set h (even neighbour counts)
 
       use_hpr       = .false.     ! apply Halted-Pendulum Relaxation
       hpr_nfit      = 5           ! number of points for polynomial fit (>=3)
