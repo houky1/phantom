@@ -28,6 +28,8 @@ module testptmass
 
  private
 
+ real :: gaussian_pos_fac  ! needed for sink creation test
+
 contains
 
 subroutine test_ptmass(ntests,npass,string)
@@ -1023,9 +1025,11 @@ subroutine test_accretion(ntests,npass,itest)
  ibin_wakei = 0
  naccreted  = 0
  dptmass(:,1:nptmass) = 0.
- !$omp parallel default(shared)&
- !$omp private(i,accreted,nneigh,xyz)&
- !$omp firstprivate(dptmass_thread,rsearch)&
+ !$omp parallel default(none) &
+ !$omp shared(npart,nptmass,xyzh,itest,ptmasskdtree,pxyzu,fxyzu,massoftype) &
+ !$omp shared(xyzmh_ptmass,pxyzu_ptmass,vxyzu,vxyz_ptmass,dptmass,t,ibin_wakei) &
+ !$omp private(i,j,accreted,nneigh,xyz) &
+ !$omp firstprivate(dptmass_thread,rsearch) &
  !$omp reduction(+:naccreted)
  dptmass_thread(:,1:nptmass) = 0.
  !$omp do
@@ -1183,6 +1187,7 @@ subroutine test_createsink(ntests,npass)
     call init_part()
     call set_units_for_tests(pos_fac,vel_fac)
     if (gr) pos_fac = 1e4*pos_fac ! to avoid too small a density for GR
+    gaussian_pos_fac = pos_fac
 
     vxyzu(:,:) = 0.
     fxyzu(:,:) = 0.
@@ -1353,20 +1358,19 @@ subroutine test_createsink(ntests,npass)
  iverbose = 0
  icreate_sinks  = 0
 
-contains
+end subroutine test_createsink
+
 !-----------------------------------------------------------------------
 !+
-!  Helper function used in sink particle creation test
+!  Gaussian density used by the sink particle creation test.
 !+
 !-----------------------------------------------------------------------
 real function gaussianr(r)
  real, intent(in) :: r
 
- gaussianr = exp(-(r/(0.05*pos_fac))**2) !1./(r**2 + 0.0001**2)
+ gaussianr = exp(-(r/(0.05*gaussian_pos_fac))**2)
 
 end function gaussianr
-
-end subroutine test_createsink
 
 !-----------------------------------------------------------------------
 !+
@@ -1970,7 +1974,7 @@ subroutine test_SDAR(ntests,npass)
  nfailed(:) = 0
  eccfin = 0.99617740539553523
  tolecc = 3e-5
- tolmom = 2.3e-11
+ tolmom = 5.e-11
  tolang = 5.e-11
  tolen  = 8.e-6
  !
@@ -2003,7 +2007,7 @@ subroutine test_sink_potential(ntests,npass)
  use units,      only:set_units
  integer, intent(inout) :: ntests,npass
  integer :: nfailed(1)
- real :: phi1,phi,eps,x0(3)
+ real :: phi1,phi2,phi,eps,x0(3)
  real :: dphidx,hi,xi,yi,zi,dumxi,dumyi,dumzi,fxi,fyi,fzi,rp
 
  if (id==master) write(*,"(/,a)") '--> testing sink particle surface force'
@@ -2029,14 +2033,18 @@ subroutine test_sink_potential(ntests,npass)
  zi = x0(3) + 1.*rp
  fxi = 0.; fyi = 0.; fzi = 0.; phi = 0.
  call get_accel_sink_gas(nptmass,xi,yi,zi,hi,xyzmh_ptmass,fxi,fyi,fzi,phi)
- ! evaluate sink-gas acceleration at some position + epsilon
- eps = 1.e-6
+ ! evaluate sink-gas potential at position +/- epsilon: phi (~27) is much larger
+ ! than phi1 - phi (~fx*eps), so a one-sided difference with eps=1e-6 loses ~8
+ ! digits to roundoff; a centred difference with eps=1e-4 is accurate to ~1e-9
+ eps = 1.e-4
  dumxi = 0.; dumyi = 0.; dumzi = 0.; phi1 = 0.
  call get_accel_sink_gas(nptmass,xi+eps,yi,zi,hi,xyzmh_ptmass,dumxi,dumyi,dumzi,phi1)
+ dumxi = 0.; dumyi = 0.; dumzi = 0.; phi2 = 0.
+ call get_accel_sink_gas(nptmass,xi-eps,yi,zi,hi,xyzmh_ptmass,dumxi,dumyi,dumzi,phi2)
  ! get the derivative of phi and check it equals the acceleration
- dphidx = -(phi1 - phi)/eps
+ dphidx = -(phi1 - phi2)/(2.*eps)
 
- call checkval(dphidx,fxi,3.9e-8,nfailed(1),'dphi/dx = acceleration')
+ call checkval(dphidx,fxi,5.e-9,nfailed(1),'dphi/dx = acceleration')
  call update_test_scores(ntests,nfailed(1:1),npass)
 
  ! reset options

@@ -18,6 +18,7 @@ module cooling_radapprox
 !
 ! :Dependencies: eos_stamatellos, infile_utils, io, part, physcon, units
 !
+ use, intrinsic :: ieee_arithmetic, only:ieee_is_nan
 
  implicit none
  real  :: Lstar = 0. ! in units of L_sun
@@ -71,7 +72,7 @@ subroutine radcool_evolve_ui(ui,dt,i,Tfloor,rhoi,uout)
  ueqi = ueqi_store(i)
  utemp = ui
  rhoi_cgs = rhoi*unit_density
- call getintenerg_opdep(Tfloor**(1.0/4.0),rhoi_cgs,ufloor_cgs)
+ call getintenerg_opdep(Tfloor,rhoi_cgs,ufloor_cgs)
 
  if (tthermi > epsilon(tthermi) .and. ui /= ueqi) then
     if (dt > 0.) then
@@ -80,12 +81,16 @@ subroutine radcool_evolve_ui(ui,dt,i,Tfloor,rhoi,uout)
        utemp = ui*expdtonttherm + ueqi*(1.-expdtonttherm)
     elseif (dt < 0.) then
        ! i.e. for the backwards step in the leapfrog integrator
+       ! to avoid amplifying (ui-ueqi) by exp(|dt|/ttherm) as dt < 0,
+       ! only do it if |dt| < ttherm, otherwise leave ui unchanged
        expdtonttherm = exp(dt/tthermi)
-       utemp = (ui - ueqi*(1.-expdtonttherm))/expdtonttherm
+       if (-dt < tthermi) then
+          utemp = (ui - ueqi*(1.-expdtonttherm))/expdtonttherm
+       endif
     endif
 
     ! if tthermi ==0 or dt/thermi is neglible then ui doesn't change
-    if (isnan(utemp) .or. utemp < epsilon(utemp)) then
+    if (ieee_is_nan(utemp) .or. utemp < epsilon(utemp)) then
        utemp = ui
     endif
  endif
@@ -196,7 +201,7 @@ subroutine radcool_update_du(i,xi,yi,zi,rhoi,ui,duhydro,Tfloor)
 
  ttherm_store(i) = tthermi
 
- if (isnan(tthermi) .or. isnan(ueqi)) then
+ if (ieee_is_nan(tthermi) .or. ieee_is_nan(ueqi)) then
     call warning("In Stamatellos cooling","energ=NaN or 0. ui=",val=ui)
  endif
 

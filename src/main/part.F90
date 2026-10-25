@@ -168,8 +168,8 @@ module part
 !
  integer, public :: ien_type
  integer, public, parameter :: ien_entropy = 1, &
-                               ien_etotal  = 2, &
-                               ien_entropy_s = 3
+                               ien_entropy_s = 2, &
+                               ien_etotal  = 3   ! internal to cons2primsolver, not a runtime option
 !
 !--one-fluid dust (small grains)
 !
@@ -192,6 +192,8 @@ module part
  real, allocatable :: sqrtgs(:) ! sqrtg(maxgr)
 ! cached GR metric-gradient force from kickdrift_gr (reused in get_force)
  real, allocatable :: fgr(:,:)       ! fgr(3,maxgr)
+! coordinate acceleration dv/dt, used in the Cullen & Dehnen shock detector
+ real, allocatable :: agr(:,:)       ! agr(3,maxgr)
 !
 !--sink particles in General relativity
 !
@@ -405,7 +407,7 @@ module part
 !--size of the buffer required for transferring particle
 !  information between MPI threads
 !
- integer, parameter :: ipartbufsize = 131
+ integer, parameter :: ipartbufsize = 137
 
  real            :: hfact,Bextx,Bexty,Bextz,tolh
  integer         :: npart
@@ -496,6 +498,7 @@ subroutine allocate_part
  call allocate_array('sqrtgs', sqrtgs, maxgr)
  if (gr) then
     call allocate_array('fgr', fgr, 3, maxgr)
+    call allocate_array('agr', agr, 3, maxgr)
     call allocate_array('fgr_ptmass', fgr_ptmass, 3, maxptmassgr)
  endif
  call allocate_array('pxyzu_ptmass', pxyzu_ptmass, maxvxyzu, maxptmassgr)
@@ -597,6 +600,7 @@ subroutine deallocate_part
  if (allocated(tmunus))       deallocate(tmunus)
  if (allocated(sqrtgs))       deallocate(sqrtgs)
  if (allocated(fgr))          deallocate(fgr)
+ if (allocated(agr))          deallocate(agr)
  if (allocated(fgr_ptmass))     deallocate(fgr_ptmass)
  if (allocated(pxyzu_ptmass)) deallocate(pxyzu_ptmass)
  if (allocated(metrics_ptmass))  deallocate(metrics_ptmass)
@@ -679,6 +683,10 @@ subroutine init_part
 !--initialise sinktree array
  shortsinktree = 1
  fxyz_ptmass_tree = 0.
+!--initialise external forces and GR metric derivatives, used before being recomputed
+ fext = 0.
+ metricderivs = 0.
+ if (gr) agr = 0.
  ! initialise arrays not passed to setup routine to zero
  rho = 0. ! flags density as not yet computed, see init_rho_from_h
  if (mhd) then
@@ -751,23 +759,24 @@ end subroutine init_part
 
 !----------------------------------------------------------------
 !+
-!  this function determines the mass of the particle
+!  this function determines the mass of the particle,
+!  including the refinement level under adaptive particle refinement
 !  where use_gas == .not. (maxphase==maxp)
-!  currently used only in readwrite_dump
 !+
 !----------------------------------------------------------------
 real function get_pmass(i,use_gas)
  integer, intent(in) :: i
  logical, intent(in) :: use_gas
+ integer :: itype
 
- if (use_gas) then
-    get_pmass = massoftype(igas)
+ itype = igas
+ if (.not.use_gas) then
+    if (iphase(i) /= 0) itype = iamtype(iphase(i))
+ endif
+ if (use_apr) then
+    get_pmass = aprmassoftype(itype,apr_level(i))
  else
-    if (iphase(i) /= 0) then
-       get_pmass = massoftype(iamtype(iphase(i)))
-    else
-       get_pmass = massoftype(igas)
-    endif
+    get_pmass = massoftype(itype)
  endif
 
 end function get_pmass
@@ -1349,6 +1358,7 @@ subroutine copy_particle(src,dst,new_part)
  if (gr) then
     pxyzu(:,dst) = pxyzu(:,src)
     if (allocated(fgr)) fgr(:,dst) = fgr(:,src)
+    if (allocated(agr)) agr(:,dst) = agr(:,src)
  endif
  divcurlv(:,dst)  = divcurlv(:,src)
  if (maxalpha ==maxp) alphaind(:,dst) = alphaind(:,src)
@@ -1433,6 +1443,7 @@ subroutine copy_particle_all(src,dst,new_part)
     endif
     dens(dst) = dens(src)
     if (allocated(fgr)) fgr(:,dst) = fgr(:,src)
+    if (allocated(agr)) agr(:,dst) = agr(:,src)
  endif
 
  divcurlv(:,dst) = divcurlv(:,src)
@@ -1756,6 +1767,8 @@ subroutine fill_sendbuf(i,xtemp,nbuf)
        call fill_buffer(xtemp,pxyzu(:,i),nbuf)
        call fill_buffer(xtemp,ppred(:,i),nbuf)
        call fill_buffer(xtemp,dens(i),nbuf)
+       call fill_buffer(xtemp,agr(:,i),nbuf)
+       call fill_buffer(xtemp,fgr(:,i),nbuf)
     endif
     call fill_buffer(xtemp,fxyzu(:,i),nbuf)
     call fill_buffer(xtemp,fext(:,i),nbuf)
@@ -1845,6 +1858,8 @@ subroutine unfill_buffer(ipart,xbuf)
     pxyzu(:,ipart)       = unfill_buf(xbuf,j,maxvxyzu)
     ppred(:,ipart)       = unfill_buf(xbuf,j,maxvxyzu)
     dens(ipart)          = unfill_buf(xbuf,j)
+    agr(:,ipart)         = unfill_buf(xbuf,j,3)
+    fgr(:,ipart)         = unfill_buf(xbuf,j,3)
  endif
  fxyzu(:,ipart)         = unfill_buf(xbuf,j,maxvxyzu)
  fext(:,ipart)          = unfill_buf(xbuf,j,3)

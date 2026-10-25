@@ -88,6 +88,7 @@ contains
          get_spin_angular_velocities, get_quadrupole_moments
       use physcon,                   only: years
       use units,                     only: utime
+      use energies,                  only:compute_energies,etot,etherm
 
       integer, intent(in)    :: npart
       real,    intent(inout) :: xyzh(:,:)
@@ -121,11 +122,16 @@ contains
       tmax = 0.
       time_seconds = real(t, kind=8) * utime
       time_years   = time_seconds / years
-      if (.not.use_hpr) return
 
       if (hpr_first_call) then
-         if (id==master) write(iprint,"(a,i0,a)") &
-            ' HPR: monitoring corotating-frame kinetic energy, window = ',hpr_nfit,' samples'
+         if (id==master) then
+            if (use_hpr) then
+               write(iprint,"(a,i0,a)") &
+                  ' HPR: monitoring corotating-frame kinetic energy, window = ',hpr_nfit,' samples'
+            else
+               write(iprint,"(a)") ' HPR: use_hpr = F, diagnostics only (velocities are NOT modified)'
+            endif
+         endif
          hpr_first_call = .false.
       endif
 
@@ -162,6 +168,7 @@ contains
          vcom1,vcom2,L_spin_system,L_total)
 
       call get_kinetic_energies(npart,xyzh,vxyzu,massoftype,omega_vec,com,ekin_corot,ekin_total)
+      call compute_energies(t)
 
       call push_buffer(t,ekin_corot)
 
@@ -173,7 +180,7 @@ contains
          if (has_maximum) then
             tmax = -bb/(2.*aa) + sum(hpr_tbuf(i0:i1))/real(hpr_nfit)
             if (tmax >= hpr_tbuf(i0) .and. tmax <= hpr_tbuf(i1)) then
-               if (ekin_corot > hpr_ekin_tol*ekin_total) then
+               if (use_hpr .and. ekin_corot > hpr_ekin_tol*ekin_total) then
                   call zero_residual_velocity(npart,xyzh,vxyzu,omega_vec,com)
                   hpr_nbuf     = 0
                   hpr_napplied = hpr_napplied + 1
@@ -195,7 +202,8 @@ contains
             aa,bb,cc,tmax,hpr_nbuf,hpr_nsep,hpr_napplied,applied, &
             L_spin1,L_spin2,L_spin_system,L_total,vcom1,vcom2, &
             q1(1),q1(2),q1(3),q1(4),q1(5),q1(6), &
-            q2(1),q2(2),q2(3),q2(4),q2(5),q2(6)
+            q2(1),q2(2),q2(3),q2(4),q2(5),q2(6), &
+            etot,etherm
          flush(csv_unit)
       endif
 
