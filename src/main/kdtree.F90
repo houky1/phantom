@@ -22,7 +22,6 @@ module kdtree
 ! :Dependencies: allocutils, boundary, dim, dtypekdtree, io, mpibalance,
 !   mpidomain, mpitree, mpiutils, part, timing
 !
- use, intrinsic :: ieee_arithmetic, only:ieee_is_nan
  use dim,         only:maxp,ncellsmax,minpart,use_apr,use_sinktree,maxptmass,maxpsph,gravity
  use io,          only:nprocs
  use dtypekdtree, only:kdnode,lenfgrav
@@ -33,7 +32,6 @@ module kdtree
 
  integer, public,  allocatable :: inoderange(:,:)
  integer, public,  allocatable :: inodeparts(:)
- type(kdnode),     allocatable :: refinementnode(:)
 !
 !--tree parameters
 !
@@ -47,14 +45,11 @@ module kdtree
  logical, public  :: use_geosplit     = gravity ! only debug flag / should be on with gravity
  logical, private :: done_init_kdtree = .false.
  logical, private :: already_warned   = .false.
+ logical, private :: tree_is_revisable = .false. ! last build was of the particle arrays
  integer, private :: numthreads
  ! scratch space for the parallel partition in build_top_parallel
  real,    allocatable, private :: tcbuf(:,:)
  integer, allocatable, private :: ipbuf(:)
-
-! Index of the last node in the local tree that has been copied to
-! the global tree
- integer, public :: irefine
 
  public :: allocate_kdtree, deallocate_kdtree
  public :: maketree, revtree,kdnode
@@ -79,20 +74,16 @@ module kdtree
 contains
 
 subroutine allocate_kdtree
- use dim, only:mpi
  use allocutils, only:allocate_array
 
  call allocate_array('inoderange', inoderange, 2, ncellsmax+1)
  call allocate_array('inodeparts', inodeparts, maxp)
- if (mpi) call allocate_array('refinementnode', refinementnode, ncellsmax+1)
 
 end subroutine allocate_kdtree
 
 subroutine deallocate_kdtree
- use dim, only:mpi
  if (allocated(inoderange)) deallocate(inoderange)
  if (allocated(inodeparts)) deallocate(inodeparts)
- if (mpi .and. allocated(refinementnode)) deallocate(refinementnode)
  if (allocated(tcbuf)) deallocate(tcbuf,ipbuf)
 
 end subroutine deallocate_kdtree
@@ -113,7 +104,7 @@ end subroutine deallocate_kdtree
 !  -implement revtree routine to update tree w/out rebuilding (done - Sep 2015)
 !+
 !-------------------------------------------------------------------------------
-subroutine maketree(node, xyzh, np, leaf_is_active, ncells, apr_tree, refinelevels,nptmass,xyzmh_ptmass)
+subroutine maketree(node, xyzh, np, leaf_is_active, ncells, apr_tree, nptmass,xyzmh_ptmass)
  use io,   only:fatal,warning,iprint,iverbose
 !$ use omp_lib
  type(kdnode),    intent(out)   :: node(:) !ncellsmax+1)
@@ -122,7 +113,6 @@ subroutine maketree(node, xyzh, np, leaf_is_active, ncells, apr_tree, refineleve
  integer,         intent(out)   :: leaf_is_active(:) !ncellsmax+1)
  integer(kind=8), intent(out)   :: ncells
  logical,         intent(in)    :: apr_tree
- integer,         intent(out),   optional :: refinelevels
  integer,         intent(in),    optional :: nptmass
  real,            intent(inout), optional :: xyzmh_ptmass(:,:)
 
@@ -164,6 +154,8 @@ subroutine maketree(node, xyzh, np, leaf_is_active, ncells, apr_tree, refineleve
  if (inoderange(1,irootnode)==0 .or. inoderange(2,irootnode)==0 ) then
     call fatal('maketree','no particles or all particles dead/accreted')
  endif
+ ! the tree used to merge particles is not of the particle arrays, so cannot be revised
+ tree_is_revisable = .not.apr_tree
 
 ! Put root node on top of stack
  ncells = 1
@@ -318,7 +310,6 @@ subroutine maketree(node, xyzh, np, leaf_is_active, ncells, apr_tree, refineleve
                'NCELLSMAX='//trim(adjustl(string))//'*maxp,')
  endif
 
- if (present(refinelevels)) refinelevels = minlevel
 
  if (iverbose >= 3) then
     write(iprint,"(a,i10,3(a,i2))") ' maketree: nodes = ',ncells,', max level = ',maxlevel,&
@@ -690,6 +681,7 @@ end subroutine empty_tree
 !+
 !---------------------------------
 subroutine construct_root_node(np,nproot,irootnode,xmini,xmaxi,leaf_is_active,xyzh,apr_tree,xyzmh_ptmass,nptmass)
+ use, intrinsic :: ieee_arithmetic, only:ieee_is_nan
  use boundary, only:cross_boundary
  use mpidomain,only:isperiodic
  use part, only:iphase,iactive
@@ -1141,6 +1133,35 @@ pure subroutine add_node_moments(pmassi,dx,dy,dz,quads,octs)
  octs(10) = octs(10) + pmassi*dz2*dz       ! zzz
 
 end subroutine add_node_moments
+
+!----------------------------------------------------------------
+!+
+!  Add the moments of a child node, about its own centre of mass,
+!  to those of its parent, where dx is the offset of the child's
+!  centre of mass from the parent's
+!+
+!----------------------------------------------------------------
+pure subroutine add_child_moments(mass,quadsc,octsc,dx,quads,octs)
+ real, intent(in)    :: mass,quadsc(6),octsc(10),dx(3)
+ real, intent(inout) :: quads(6),octs(10)
+
+ ! the child's own moments, plus those of its mass at its centre of mass
+ quads = quads + quadsc
+ octs  = octs  + octsc
+ call add_node_moments(mass,dx(1),dx(2),dx(3),quads,octs)
+ ! cross terms of the child's quadrupole with the offset
+ octs(1)  = octs(1)  + 3.*quadsc(1)*dx(1)                                ! xxx
+ octs(2)  = octs(2)  + quadsc(1)*dx(2) + 2.*quadsc(2)*dx(1)              ! xxy
+ octs(3)  = octs(3)  + quadsc(1)*dx(3) + 2.*quadsc(3)*dx(1)              ! xxz
+ octs(4)  = octs(4)  + quadsc(4)*dx(1) + 2.*quadsc(2)*dx(2)              ! xyy
+ octs(5)  = octs(5)  + quadsc(2)*dx(3) + quadsc(3)*dx(2) + quadsc(5)*dx(1) ! xyz
+ octs(6)  = octs(6)  + quadsc(6)*dx(1) + 2.*quadsc(3)*dx(3)              ! xzz
+ octs(7)  = octs(7)  + 3.*quadsc(4)*dx(2)                                ! yyy
+ octs(8)  = octs(8)  + quadsc(4)*dx(3) + 2.*quadsc(5)*dx(2)              ! yyz
+ octs(9)  = octs(9)  + quadsc(6)*dx(2) + 2.*quadsc(5)*dx(3)              ! yzz
+ octs(10) = octs(10) + 3.*quadsc(6)*dx(3)                                ! zzz
+
+end subroutine add_child_moments
 #endif
 
 !--------------------------------------------------------------------
@@ -1626,198 +1647,169 @@ subroutine special_sort_particles_in_cell(iaxis,imin,imax,min_l,max_l,min_r,max_
 
 end subroutine special_sort_particles_in_cell
 
-!-----------------------------------------------
+!--------------------------------------------------------------------------------
 !+
-!  Routine to update a constructed tree
-!  Note: current version ONLY works if
-!  tree is built to < maxlevel_indexed
-!  That is, it relies on the 2^n style tree
-!  indexing to sweep out each level
+!  Revise the tree for new particle positions without rebuilding it.
+!
+!  The particles stay in the leaves of the last build. The leaves are
+!  recomputed from their particles, and each parent from its two children,
+!  working up the tree a level at a time: one pass over the particles rather
+!  than one per level. A parent bounds its children rather than its
+!  particles, so the nodes are looser than a rebuilt tree would give, but
+!  every node still bounds its particles: neighbour lists are unchanged,
+!  only longer to find.
+!
+!  Returns ok=.false., and the tree must be rebuilt, if the last build was
+!  not of these particles, or if particles have been added, accreted or
+!  killed since.
 !+
-!-----------------------------------------------
-subroutine revtree(node, xyzh, leaf_is_active, ncells)
- use dim,  only:maxp,use_apr,ind_timesteps
- use part, only:maxphase,iphase,igas,massoftype,iamtype,aprmassoftype,&
-                apr_level,iactive,treecache,isdead_or_accreted
- use io,   only:fatal
- type(kdnode),    intent(inout) :: node(:) !ncellsmax+1)
+!--------------------------------------------------------------------------------
+subroutine revtree(node,xyzh,np,leaf_is_active,ncells,ok)
+ use dim,  only:ind_timesteps,periodic,mpi
+ use part, only:iphase,iactive,isdead_or_accreted,maxphase,igas,massoftype,iamtype
+ type(kdnode),    intent(inout) :: node(:)
  real,            intent(in)    :: xyzh(:,:)
- integer,         intent(inout) :: leaf_is_active(:) !ncellsmax+1)
+ integer,         intent(in)    :: np
+ integer,         intent(inout) :: leaf_is_active(:)
  integer(kind=8), intent(in)    :: ncells
- real :: hmax, r2max
- real :: xi, yi, zi, hi
- real :: dx, dy, dz, dr2
-#ifdef GRAVITY
- real :: quads(6)
- real :: octs(10)
-#endif
- integer :: inode, ipart, ipartidx, i, nptot
- real :: pmassi, totmass
- real :: x0(3)
- real :: xcofm, ycofm, zcofm, fac, dfac
+ logical,         intent(out)   :: ok
+ integer, allocatable :: nodelist(:)
+ integer :: ilevel(0:maxdepth+1)
+ integer :: nproot,nlive,nbad,ip,i,j,n,inode,il,ir,level,nlevel,mymum
+ real    :: x0(3),xmini(3),xmaxi(3),totmass_node,ml,mr,dxl(3),dxr(3)
  logical :: nodeisactive
 
- pmassi = massoftype(igas)
-
- ! find maximum index in inodeparts that we need to update in treecache
- nptot = 0
- do i=1,int(ncells)
-    if (i > 1 .and. node(i)%parent == 0) cycle
-    if (inoderange(1,i) > 0 .and. inoderange(2,i) >= inoderange(1,i)) then
-       nptot = max(nptot, inoderange(2,i))
-    endif
- enddo
-
- ! update treecache for particles in the tree only
- ! mark dead/accreted particles by setting treecache(4,i) negative
+ ok = .false.
+ ! with more than one MPI task the global tree must also be rebuilt (on one task there is none)
+ if (.not.tree_is_revisable .or. use_apr .or. use_sinktree .or. periodic .or. (mpi .and. nprocs > 1)) return
+ nproot = inoderange(2,irootnode)
+ if (inoderange(1,irootnode) /= 1 .or. nproot < 1) return
+ !
+ ! refresh the particle list: positions, masses and active flags
+ !
+ nlive = 0
+ nbad  = 0
  !$omp parallel default(none) &
- !$omp shared(nptot,inodeparts,xyzh,iphase,apr_level) &
- !$omp shared(massoftype,aprmassoftype,treecache) &
- !$omp shared(maxphase,maxp) &
- !$omp private(i,ipartidx)
+ !$omp shared(np,nproot,xyzh,inodeparts,treecache,iphase,massoftype,maxphase,maxp) &
+ !$omp private(ip,i) &
+ !$omp reduction(+:nlive,nbad)
  !$omp do schedule(static)
- do i=1,nptot
-    if (inodeparts(i) == 0) cycle
-    ipartidx = abs(inodeparts(i))
-    treecache(1:4,i) = xyzh(1:4,ipartidx)
-    ! compute and store mass
-    if (maxphase==maxp) then
-       if (use_apr) then
-          treecache(5,i) = aprmassoftype(iamtype(iphase(ipartidx)),apr_level(ipartidx))
+ do i=1,np
+    if (.not.isdead_or_accreted(xyzh(4,i))) nlive = nlive + 1
+ enddo
+ !$omp enddo nowait
+ !$omp do schedule(static)
+ do ip=1,nproot
+    i = abs(inodeparts(ip))
+    if (i < 1 .or. i > np) then
+       nbad = nbad + 1
+       cycle
+    endif
+    if (isdead_or_accreted(xyzh(4,i))) nbad = nbad + 1
+    if (ind_timesteps) then
+       if (iactive(iphase(i))) then
+          inodeparts(ip) = i  ! +ve if active
        else
-          treecache(5,i) = massoftype(iamtype(iphase(ipartidx)))
+          inodeparts(ip) = -i ! -ve if inactive
        endif
-    elseif (use_apr) then
-       treecache(5,i) = aprmassoftype(igas,apr_level(ipartidx))
+    endif
+    treecache(1:4,ip) = xyzh(1:4,i)
+    if (maxphase==maxp) then
+       treecache(5,ip) = massoftype(iamtype(iphase(i)))
     else
-       treecache(5,i) = massoftype(igas)
+       treecache(5,ip) = massoftype(igas)
     endif
  enddo
  !$omp enddo
  !$omp end parallel
-
-!$omp parallel default(none) &
-!$omp shared(maxp,maxphase) &
-!$omp shared(ncells) &
-!$omp shared(node,inoderange,inodeparts,treecache,leaf_is_active) &
-!$omp private(hmax,r2max,xi,yi,zi,hi) &
-!$omp private(dx,dy,dz,dr2,inode,ipart,x0) &
-!$omp private(xcofm,ycofm,zcofm,fac,dfac,nodeisactive) &
-#ifdef GRAVITY
-!$omp private(quads,octs) &
-#endif
-!$omp firstprivate(pmassi) &
-!$omp private(totmass)
-!$omp do schedule(guided)
- over_nodes: do inode=1,int(ncells)
-    if (inode > 1 .and. node(inode)%parent == 0) cycle
-    ! initialize node properties
-    node(inode)%xcen(:) = 0.
-    node(inode)%size    = 0.
-    node(inode)%hmax    = 0.
-#ifdef GRAVITY
-    node(inode)%mass    = 0.
-    node(inode)%quads(:)= 0.
-    node(inode)%octs(:) = 0.
-#endif
-    ! initialize leaf_is_active (will be set for leaf nodes below)
-    leaf_is_active(inode) = 0
-
-    ! check if node has particles
-    if (inoderange(1,inode) <= 0 .or. inoderange(2,inode) < inoderange(1,inode)) cycle over_nodes
-
-    ! find centre of mass from particle list using same algorithm as maketree
-    ! also check for active particles and compute hmax during this loop
-    xcofm = 0.
-    ycofm = 0.
-    zcofm = 0.
-    totmass = 0.0
-    hmax = 0.
-    dfac = 1.
-    if (pmassi > 0.) then
-       dfac = 1./pmassi
-    endif
-    nodeisactive = .false.
-    do ipart = inoderange(1,inode), inoderange(2,inode)
-       if (inodeparts(ipart) == 0) cycle
-       xi = treecache(1,ipart)
-       yi = treecache(2,ipart)
-       zi = treecache(3,ipart)
-       hi = treecache(4,ipart)
-       ! check condition after loading (dead/accreted particles have hi <= 0)
-       if (hi <= 0.) cycle
-       hi = abs(hi)
-       pmassi = treecache(5,ipart)
-       ! check for active particles (for leaf_is_active flag)
-       if (ind_timesteps .and. .not. nodeisactive) then
-          if (inodeparts(ipart) > 0) nodeisactive = .true.
+ if (nbad > 0 .or. nlive /= nproot) return
+ !
+ ! list the nodes level by level, from the root
+ !
+ allocate(nodelist(ncells))
+ nodelist(1) = irootnode
+ n = 1
+ nlevel = 0
+ ilevel(0) = 1
+ do while (ilevel(nlevel) <= n)
+    ilevel(nlevel+1) = n + 1
+    do j=ilevel(nlevel),ilevel(nlevel+1)-1
+       il = node(nodelist(j))%leftchild
+       if (il > 0) then
+          nodelist(n+1) = il
+          nodelist(n+2) = node(nodelist(j))%rightchild
+          n = n + 2
        endif
-       fac = pmassi*dfac
-       xcofm = xcofm + fac*xi
-       ycofm = ycofm + fac*yi
-       zcofm = zcofm + fac*zi
-       totmass = totmass + pmassi
-       hmax = max(hi, hmax)
     enddo
-    if (.not. ind_timesteps) nodeisactive = .true.
-
-    if (totmass <= 0.0) cycle over_nodes
-
-    x0(1) = xcofm/(totmass*dfac)
-    x0(2) = ycofm/(totmass*dfac)
-    x0(3) = zcofm/(totmass*dfac)
-
-    ! update cell size and quads
-    r2max = 0.
-#ifdef GRAVITY
-    quads = 0.
-    octs  = 0.
-#endif
-    do ipart = inoderange(1,inode), inoderange(2,inode)
-       ! load all treecache values sequentially (1,2,3,4,5) for cache efficiency
-       xi = treecache(1,ipart)
-       yi = treecache(2,ipart)
-       zi = treecache(3,ipart)
-       hi = treecache(4,ipart)
-       ! check condition after loading (dead/accreted particles have hi <= 0)
-       if (hi <= 0.) cycle
-       pmassi = treecache(5,ipart)
-       dx = xi - x0(1)
-       dy = yi - x0(2)
-       dz = zi - x0(3)
-       dr2 = dx*dx + dy*dy + dz*dz
-       r2max = max(dr2, r2max)
-#ifdef GRAVITY
-       call add_node_moments(pmassi,dx,dy,dz,quads,octs)
-#endif
-    enddo
-
-    node(inode)%xcen(1) = x0(1)
-    node(inode)%xcen(2) = x0(2)
-    node(inode)%xcen(3) = x0(3)
-    node(inode)%size = sqrt(r2max) + epsilon(r2max)
-    node(inode)%hmax = hmax
-#ifdef GRAVITY
-    node(inode)%mass = totmass
-    node(inode)%quads = quads
-    node(inode)%octs  = octs
-#endif
-
-    ! set leaf_is_active flag for leaf nodes (matching maketree behavior)
-    if (node(inode)%leftchild == 0 .and. node(inode)%rightchild == 0) then
-       if (ind_timesteps) then
-          if (nodeisactive) then
-             leaf_is_active(inode) = 1
+    nlevel = nlevel + 1
+ enddo
+ !
+ ! recompute the nodes, from the deepest level up
+ !
+ !$omp parallel default(none) &
+ !$omp shared(nlevel,ilevel,nodelist,node,inoderange,inodeparts,leaf_is_active) &
+ !$omp private(level,j,inode,il,ir,n,ip,mymum,x0,xmini,xmaxi,totmass_node,ml,mr,dxl,dxr,nodeisactive)
+ do level=nlevel-1,0,-1
+    !$omp do schedule(guided)
+    do j=ilevel(level),ilevel(level+1)-1
+       inode = nodelist(j)
+       il = node(inode)%leftchild
+       if (il == 0) then
+          ! leaf: from its particles
+          n = inoderange(2,inode) - inoderange(1,inode) + 1
+          if (inoderange(1,inode) <= 0 .or. n < 1) cycle
+          mymum = node(inode)%parent
+          xmini = 0. ! only used for the global (MPI) tree
+          xmaxi = 0.
+          call compute_nodes_cofm(n,inode,x0,totmass_node,.false.)
+          call set_nodes_properties(n,inode,x0,totmass_node,mymum,node(inode),xmini,xmaxi,&
+                                    level,.false.,.false.)
+          node(inode)%leftchild  = 0
+          node(inode)%rightchild = 0
+          node(inode)%mass       = totmass_node
+          if (ind_timesteps) then
+             nodeisactive = .false.
+             do ip=inoderange(1,inode),inoderange(2,inode)
+                if (inodeparts(ip) > 0) then
+                   nodeisactive = .true.
+                   exit
+                endif
+             enddo
+             if (nodeisactive) then
+                leaf_is_active(inode) = 1
+             else
+                leaf_is_active(inode) = -1
+             endif
           else
-             leaf_is_active(inode) = -1
+             leaf_is_active(inode) = 1
           endif
        else
-          leaf_is_active(inode) = 1
+          ! parent: the centre of mass of its children, and a sphere bounding theirs
+          ir = node(inode)%rightchild
+          ml = node(il)%mass
+          mr = node(ir)%mass
+          totmass_node = ml + mr
+          x0  = (ml*node(il)%xcen + mr*node(ir)%xcen)/totmass_node
+          dxl = node(il)%xcen - x0
+          dxr = node(ir)%xcen - x0
+          node(inode)%xcen = x0
+          node(inode)%size = max(sqrt(dot_product(dxl,dxl)) + node(il)%size, &
+                                 sqrt(dot_product(dxr,dxr)) + node(ir)%size)
+          node(inode)%hmax = max(node(il)%hmax,node(ir)%hmax)
+          node(inode)%mass = totmass_node
+#ifdef GRAVITY
+          node(inode)%quads = 0.
+          node(inode)%octs  = 0.
+          call add_child_moments(ml,node(il)%quads,node(il)%octs,dxl,node(inode)%quads,node(inode)%octs)
+          call add_child_moments(mr,node(ir)%quads,node(ir)%octs,dxr,node(inode)%quads,node(inode)%octs)
+#endif
        endif
-    endif
- enddo over_nodes
-!$omp enddo
-!$omp end parallel
+    enddo
+    !$omp enddo
+ enddo
+ !$omp end parallel
+ deallocate(nodelist)
+ ok = .true.
 
 end subroutine revtree
 
@@ -1826,8 +1818,8 @@ end subroutine revtree
 !  Routine to build the global level tree
 !+
 !-------------------------------------------------------------------------------
-subroutine maketreeglobal(nodeglobal,node,nodemap,globallevel,refinelevels,xyzh,&
-                          np,cellatid,leaf_is_active,ncells,apr_tree,nptmass,xyzmh_ptmass)
+subroutine maketreeglobal(nodeglobal,node,globallevel,xyzh,&
+                          np,leaf_is_active,ncells,apr_tree,nptmass,xyzmh_ptmass)
  use io,           only:fatal,warning,id,nprocs,master
  use mpiutils,     only:reduceall_mpi
  use mpibalance,   only:balancedomains
@@ -1839,12 +1831,9 @@ subroutine maketreeglobal(nodeglobal,node,nodemap,globallevel,refinelevels,xyzh,
 
  type(kdnode),    intent(out)   :: nodeglobal(:)    ! ncellsmax+1
  type(kdnode),    intent(out)   :: node(:)          ! ncellsmax+1
- integer,         intent(out)   :: nodemap(:)       ! ncellsmax+1
  integer,         intent(out)   :: globallevel
- integer,         intent(out)   :: refinelevels
  integer,         intent(inout) :: np
  real,            intent(inout) :: xyzh(:,:)
- integer,         intent(out)   :: cellatid(:)      ! ncellsmax+1
  integer,         intent(out)   :: leaf_is_active(:)  ! ncellsmax+1)
  integer(kind=8), intent(out)   :: ncells
  logical,         intent(in)    :: apr_tree
@@ -1860,10 +1849,9 @@ subroutine maketreeglobal(nodeglobal,node,nodemap,globallevel,refinelevels,xyzh,
  integer                           :: nl, nr
  integer                           :: il, ir, iself, parent
  integer                           :: level
- integer                           :: nnodestart, nnodeend,locstart,locend
+ integer                           :: nnodestart, nnodeend
  integer                           :: npcounter
- integer                           :: i, k, offset, roffset, roffset_prev, coffset
- integer                           :: inode
+ integer                           :: i
  integer                           :: npnode
  logical                           :: wassplit,sinktree
  real(kind=4)                      :: t1,t2,tcpu1,tcpu2
@@ -1877,6 +1865,7 @@ subroutine maketreeglobal(nodeglobal,node,nodemap,globallevel,refinelevels,xyzh,
 
  ! root is level 0
  globallevel = int(ceiling(log(real(nprocs)) / log(2.0)))
+ if (2**globallevel /= nprocs) call fatal('maketreeglobal','number of MPI tasks must be a power of 2')
 
  minlevel = maxdepth - 1
  maxlevel = 0
@@ -2018,74 +2007,13 @@ subroutine maketreeglobal(nodeglobal,node,nodemap,globallevel,refinelevels,xyzh,
 
  ! local tree
  if (sinktree) then
-    call maketree(node,xyzh,np,leaf_is_active,ncells,apr_tree,refinelevels,nptmass,xyzmh_ptmass)
+    call maketree(node,xyzh,np,leaf_is_active,ncells,apr_tree,nptmass=nptmass,xyzmh_ptmass=xyzmh_ptmass)
  else
-    call maketree(node,xyzh,np,leaf_is_active,ncells,apr_tree,refinelevels)
+    call maketree(node,xyzh,np,leaf_is_active,ncells,apr_tree)
  endif
 
- ! tree refinement: the top levels of the local trees are copied into the global tree.
- ! Limit the depth so the global tree fits in nodeglobal, which is the size of the local
- ! tree, so that memory per task does not grow with the total number of particles.
- ! A shallower global tree only means coarser cells are used to decide what to export
- do while (refinelevels > 1 .and. 2**(globallevel+refinelevels+1)-1 > size(nodeglobal))
-    refinelevels = refinelevels - 1
- enddo
- refinelevels = int(reduceall_mpi('min',refinelevels),kind=kind(refinelevels))
- roffset_prev = 1
-
- irefine = 0
- do i = 1,refinelevels
-    offset = 2**(globallevel + i)
-    roffset = 2**i
-
-    nnodestart = offset
-    nnodeend   = 2*nnodestart-1
-
-    if (nnodeend > size(nodeglobal)) call fatal('kdtree', 'global tree refinement has exceeded ncellsmaxglobal')
-
-    locstart   = roffset
-    locend     = 2*locstart-1
-
-    ! index shift the node to the global level
-    do k = roffset,2*roffset-1
-       refinementnode(k) = node(k)
-       coffset = refinementnode(k)%parent - roffset_prev
-
-       refinementnode(k)%parent = 2**(globallevel + i - 1) + id * roffset_prev + coffset
-
-       if (i /= refinelevels) then
-          refinementnode(k)%leftchild  = 2**(globallevel + i + 1) + 2*id*roffset + 2*(k - roffset)
-          refinementnode(k)%rightchild = refinementnode(k)%leftchild + 1
-       else
-          refinementnode(k)%leftchild = 0
-          refinementnode(k)%rightchild = 0
-       endif
-    enddo
-
-    roffset_prev = roffset
-    ! sync, replacing level with globallevel, since all procs will get synced
-    ! and deeper comms do not exist
-    call tree_sync(refinementnode(locstart:locend),roffset, &
-                   nodeglobal(nnodestart:nnodeend),nnodestart-nnodeend, &
-                   id,globallevel)
-
-    ! get the mapping from the local tree to the global tree, for future hmax updates
-    do inode = locstart,locend
-       nodemap(inode) = nnodestart + (id * roffset) + (inode - locstart)
-    enddo
- enddo
-!  The index up to which the local tree is copied to the global tree
- irefine = 2*roffset-1
-
- ! cellatid is zero by default
- cellatid = 0
- do i = 1,nprocs
-    offset = 2**(globallevel+refinelevels)
-    roffset = 2**refinelevels
-    do k = 1,roffset
-       cellatid(offset + (i - 1) * roffset + (k - 1)) = i
-    enddo
- enddo
+ ! the nodes of the local trees near the domains of other tasks are then
+ ! copied into the global tree below the domain nodes (graft_local_trees in neighkdtree)
 
 end subroutine maketreeglobal
 

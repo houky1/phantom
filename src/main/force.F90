@@ -41,14 +41,14 @@ module forces
 !
 ! :Dependencies: boundary, cooling, derivutils, dim, dust, eos, eos_shen,
 !   eos_stamatellos, growth, io, io_summary, kdtree, kernel, metric_tools,
-!   mpiderivs, mpiforce, mpimemory, mpiutils, neighkdtree, nicil, omputils,
-!   options, part, physcon, ptmass, ptmass_heating, radiation_utils,
+!   mpiderivs, mpiforce, mpimemory, mpiutils, neighkdtree, nicil, options,
+!   part, physcon, ptmass, ptmass_heating, radiation_utils,
 !   shock_capturing, timestep, timestep_ind, timing, units, utils_gr,
 !   viscosity
 !
  use dim, only:maxfsum,maxxpartveciforce,maxp,ndivcurlB,&
                maxdusttypes,maxdustsmall,do_radiation,maxpsph
- use mpiforce,    only:cellforce,stackforce
+ use mpiforce,    only:cellforce,stackforce,maxcellleaves
  use neighkdtree, only:leaf_is_active
  use kdtree,      only:inodeparts,inoderange,ih1,im,irho,izetaomega,isoftomega
  use part,        only:iradxi,ifluxx,ifluxy,ifluxz,ikappa,ien_type,ien_entropy,ien_entropy_s
@@ -200,10 +200,11 @@ subroutine force(icall,npart,xyzh,vxyzu,fxyzu,divcurlv,divcurlB,Bevol,dBevol,&
                  dustfrac,ddustevol,fext,fxyz_drag,&
                  ipart_rhomax,dt,stressmax,eos_vars,dens,metrics,apr_level)
 
- use dim,          only:maxvxyzu,mhd,mhd_nonideal,mpi,use_dust,use_apr,use_sinktree
+ use dim,          only:maxvxyzu,mhd,mhd_nonideal,mpi,use_dust,use_apr,use_sinktree,gravity,minpart
  use io,           only:iprint,fatal,iverbose,id,master,real4,warning,error,nprocs
  use neighkdtree,  only:get_neighbour_list,get_hmaxcell,get_cell_location,listneigh,&
-                        active_leaves,nactive_leaves
+                        active_leaves,nactive_leaves,ncellchunk,let_exchange,use_dualtree,&
+                        get_leaf_neighbours
  use part,         only:alphaind,iactive,gradh,&
                         iphase,igas,maxgradh,dvdx,eta_nimhd,deltav,poten,iamtype,&
                         dragreg,filfac,fxyz_dragold,nptmass,shortsinktree,&
@@ -233,15 +234,16 @@ subroutine force(icall,npart,xyzh,vxyzu,fxyzu,divcurlv,divcurlB,Bevol,dBevol,&
 #endif
  use dust,         only:drag_implicit
  use nicil,        only:nimhd_get_jcbcb
- use mpiderivs,    only:send_cell,recv_cells,check_send_finished,init_cell_exchange,&
-                        finish_cell_exchange,recv_while_wait,reset_cell_counters,cell_counters,&
-                        init_send_requests
+ use mpiderivs,    only:send_cell,recv_cells,init_cell_exchange,record_send_wait,&
+                        finish_cell_exchange,recv_while_wait,reset_cell_counters,cell_counters
  use mpimemory,    only:reserve_stack,reset_stacks,get_cell,write_cell
  use mpimemory,    only:stack_remote  => force_stack_1
+ use mpimemory,    only:force_pool,get_packed_cell,clear_pool
  use mpimemory,    only:stack_waiting => force_stack_2
  use io_summary,   only:iosumdtr
- use timing,       only:increment_timer,get_timings,itimer_force_local,itimer_force_remote
- use omputils,     only:omp_thread_num,omp_num_threads
+ use timing,       only:increment_timer,get_timings,itimer_force_local,itimer_force_remote,itimer_force_let,&
+                        itimer_force_lcomp,itimer_force_rcomp,&
+                        itimer_force_lsend,itimer_force_rsend
  use eos,          only:iresistive_heating
 
  integer,         intent(in)    :: icall,npart
@@ -297,13 +299,14 @@ subroutine force(icall,npart,xyzh,vxyzu,fxyzu,divcurlv,divcurlB,Bevol,dBevol,&
 #endif
  integer(kind=1)           :: ibinnow_m1
 
- type(cellforce)           :: cell,xsendbuf,xrecvbuf(nprocs)
- integer                   :: mpitype
- logical                   :: remote_export(nprocs),do_export,idone(nprocs),thread_complete(omp_num_threads)
- integer                   :: irequestsend(nprocs),irequestrecv(nprocs)
- integer                   :: ncomplete_mpi
+ type(cellforce)           :: cell
+ integer                   :: leaves(maxcellleaves),nleaves ! leaves of this task sent with a remote cell
+ logical                   :: remote_export(nprocs),do_export
+ logical                   :: ptargets(minpart,nprocs) ! tasks each particle of a cell is sent to
+ logical                   :: exchange ! whether cells are exchanged with other MPI tasks
 
  real(kind=4)              :: t1,t2,tcpu1,tcpu2
+ real(kind=4)              :: tc1,tcpuc1,tc2,tcpuc2 ! start and end of the compute loops
 
 #ifdef IND_TIMESTEPS
  nbinmaxnew      = 0
@@ -391,6 +394,9 @@ subroutine force(icall,npart,xyzh,vxyzu,fxyzu,divcurlv,divcurlB,Bevol,dBevol,&
        fxyz_ptmass_tree(:,i) = 0.
     enddo
     !$omp end parallel do
+    ! the potential of a sink is set only by the task whose tree holds it, and
+    ! summed over all tasks: clear any value left from when another task held it
+    poten(maxpsph+1:maxpsph+nptmass) = 0.
  endif
 
  ! sink particle creation
@@ -400,9 +406,19 @@ subroutine force(icall,npart,xyzh,vxyzu,fxyzu,divcurlv,divcurlB,Bevol,dBevol,&
  rhomax        = 0.
 #endif
 
- if (mpi) then
+ !--the cell exchange is only needed with more than one MPI task
+ exchange = mpi .and. nprocs > 1
+ if (exchange) then
     call reset_stacks
     call reset_cell_counters(cell_counters)
+ endif
+ !--import the nodes of other tasks that the dual tree walk could open (the
+ !  locally essential tree), and check that the walk never meets a truncated node
+ if (exchange .and. gravity .and. use_dualtree) then
+    call get_timings(t1,tcpu1)
+    call let_exchange()
+    call get_timings(t2,tcpu2)
+    call increment_timer(itimer_force_let,t2-t1,tcpu2-tcpu1)
  endif
 
 !
@@ -445,11 +461,9 @@ subroutine force(icall,npart,xyzh,vxyzu,fxyzu,divcurlv,divcurlB,Bevol,dBevol,&
 !$omp shared(nprocs,icall) &
 !$omp shared(poten) &
 !$omp private(icell,i,ia) &
-!$omp private(cell) &
-!$omp private(remote_export) &
-!$omp private(idone) &
+!$omp private(cell,leaves,nleaves) &
+!$omp private(remote_export,ptargets) &
 !$omp private(nneigh) &
-!$omp private(mpitype) &
 !$omp shared(dens) &
 !$omp shared(metrics) &
 !$omp shared(apr_level) &
@@ -464,14 +478,8 @@ subroutine force(icall,npart,xyzh,vxyzu,fxyzu,divcurlv,divcurlB,Bevol,dBevol,&
 #endif
 !$omp shared(id) &
 !$omp private(do_export) &
-!$omp private(irequestrecv) &
-!$omp private(irequestsend) &
-!$omp private(xrecvbuf) &
-!$omp private(xsendbuf) &
-!$omp shared(cell_counters) &
-!$omp shared(thread_complete) &
-!$omp shared(ncomplete_mpi) &
-!$omp shared(stack_remote) &
+!$omp shared(cell_counters,exchange) &
+!$omp shared(stack_remote,force_pool) &
 !$omp shared(stack_waiting) &
 #ifdef IND_TIMESTEPS
 !$omp shared(nbinmax) &
@@ -497,18 +505,16 @@ subroutine force(icall,npart,xyzh,vxyzu,fxyzu,divcurlv,divcurlB,Bevol,dBevol,&
 !$omp shared(t1) &
 !$omp shared(t2) &
 !$omp shared(tcpu1) &
-!$omp shared(tcpu2)
+!$omp shared(tcpu2) &
+!$omp shared(tc1,tcpuc1,tc2,tcpuc2,use_dualtree)
 
- call init_cell_exchange(xrecvbuf,irequestrecv,thread_complete,ncomplete_mpi,mpitype)
+ if (exchange) call init_cell_exchange(stack_remote)
 
  !$omp single
  call get_timings(t1,tcpu1)
  !$omp end single
 
- !--initialise send requests to null
- call init_send_requests(irequestsend)
-
- !$omp do schedule(runtime)
+ !$omp do schedule(dynamic,ncellchunk)
  over_cells: do ia=1,nactive_leaves
     icell = active_leaves(ia)
 
@@ -530,20 +536,26 @@ subroutine force(icall,npart,xyzh,vxyzu,fxyzu,divcurlv,divcurlB,Bevol,dBevol,&
 
     cell%owner = id
     do_export = any(remote_export)
+    !--send each task only the particles that interact with its particles. Not with
+    !  self-gravity: the remote task then computes the gravity of its nearby nodes,
+    !  which the global tree walk did not, on every particle of the cell
+    if (do_export .and. .not.gravity) then
+       call particle_targets(cell,remote_export,ptargets)
+       do_export = any(remote_export)
+    endif
 
-    if (mpi) then
-       call recv_cells(stack_remote,xrecvbuf,irequestrecv,cell_counters)
+    if (exchange) then
+       call recv_cells(stack_remote,cell_counters)
        if (do_export) then
-          if (stack_waiting%n > 0) then
-             !--wait for broadcast to complete, continue to receive whilst doing so
-             idone(:) = .false.
-             do while(.not.all(idone))
-                call check_send_finished(irequestsend,idone)
-                call recv_cells(stack_remote,xrecvbuf,irequestrecv,cell_counters)
-             enddo
-          endif
           call reserve_stack(stack_waiting,cell%waiting_index)
-          call send_cell(cell,remote_export,irequestsend,xsendbuf,cell_counters,mpitype)  ! send to remote
+          if (gravity .and. use_dualtree) then
+             ! to each task, with its leaves that the dual tree walk paired with the cell
+             call send_cell_with_leaves(cell,stack_remote,cell_counters)
+          elseif (gravity) then
+             call send_cell(cell,remote_export,stack_remote,cell_counters)  ! send to remote
+          else
+             call send_cell(cell,remote_export,stack_remote,cell_counters,ptargets)
+          endif
        endif
     endif
 
@@ -576,18 +588,16 @@ subroutine force(icall,npart,xyzh,vxyzu,fxyzu,divcurlv,divcurlB,Bevol,dBevol,&
 
  enddo over_cells
  !$omp enddo
-
- if (stack_waiting%n > 0) then
-    idone(:) = .false.
-    do while(.not.all(idone))
-       call check_send_finished(irequestsend,idone)
-       call recv_cells(stack_remote,xrecvbuf,irequestrecv,cell_counters)
-    enddo
+ !$omp single
+ call get_timings(tc2,tcpuc2)
+ if (exchange) then
+    call increment_timer(itimer_force_lcomp,tc2-t1,tcpuc2-tcpu1)
+    call record_send_wait(itimer_force_lsend)
  endif
+ !$omp end single
 
- if (mpi) then
-    call recv_while_wait(stack_remote,xrecvbuf,irequestrecv,&
-         irequestsend,thread_complete,cell_counters,ncomplete_mpi)
+ if (exchange) then
+    call recv_while_wait(stack_remote,cell_counters)
     call reset_cell_counters(cell_counters)
  endif
 
@@ -598,14 +608,24 @@ subroutine force(icall,npart,xyzh,vxyzu,fxyzu,divcurlv,divcurlB,Bevol,dBevol,&
  !$omp end single
  !$omp barrier
 
- igot_remote: if (mpi .and. stack_remote%n > 0) then
-    !$omp do schedule(runtime)
-    over_remote: do i = 1,stack_remote%n
-       cell = get_cell(stack_remote,i)
+ igot_remote: if (exchange .and. force_pool%n > 0) then
+    !$omp single
+    call get_timings(tc1,tcpuc1)
+    !$omp end single
+    !$omp do schedule(dynamic,ncellchunk)
+    over_remote: do i = 1,force_pool%n
+       call get_packed_cell(force_pool,i,cell,leaves,nleaves)
 
-       call get_neighbour_list(-1,listneigh,nneigh,xyzh,xyzcache,maxcellcache, &
-                               getj=.true.,f=cell%fgrav,&
-                               cell_xpos=cell%xpos,cell_xsizei=cell%xsizei,cell_rcuti=cell%rcuti)
+       if (nleaves > 0) then
+          ! the trial neighbours are the particles of the leaves the owner's dual
+          ! tree walk paired with the cell; its long-range gravity is the owner's
+          call get_leaf_neighbours(cell%xpos,leaves,nleaves,listneigh,nneigh,xyzcache,maxcellcache)
+          cell%fgrav = 0.
+       else
+          call get_neighbour_list(-1,listneigh,nneigh,xyzh,xyzcache,maxcellcache, &
+                                  getj=.true.,f=cell%fgrav,&
+                                  cell_xpos=cell%xpos,cell_xsizei=cell%xsizei,cell_rcuti=cell%rcuti)
+       endif
 
        call compute_cell(cell,listneigh,nneigh,Bevol,xyzh,vxyzu,fxyzu, &
                          iphase,divcurlv,divcurlB,alphaind,eta_nimhd,eos_vars, &
@@ -615,34 +635,26 @@ subroutine force(icall,npart,xyzh,vxyzu,fxyzu,divcurlv,divcurlB,Bevol,dBevol,&
        remote_export = .false.
        remote_export(cell%owner+1) = .true. ! use remote_export array to send back to the owner
 
-       idone(:) = .false.
-       do while(.not.all(idone))
-          call check_send_finished(irequestsend,idone)
-          call recv_cells(stack_waiting,xrecvbuf,irequestrecv,cell_counters)
-       enddo
-
-       call send_cell(cell,remote_export,irequestsend,xsendbuf,cell_counters,mpitype) ! send the cell back to owner
+       call send_cell(cell,remote_export,stack_waiting,cell_counters) ! send the cell back to owner
 
     enddo over_remote
     !$omp enddo
-
     !$omp single
-    stack_remote%n = 0
+    call get_timings(tc2,tcpuc2)
+    call increment_timer(itimer_force_rcomp,tc2-tc1,tcpuc2-tcpuc1)
+    call record_send_wait(itimer_force_rsend)
     !$omp end single
 
-    idone(:) = .false.
-    do while(.not.all(idone))
-       call check_send_finished(irequestsend,idone)
-       call recv_cells(stack_waiting,xrecvbuf,irequestrecv,cell_counters)
-    enddo
+    !$omp single
+    call clear_pool(force_pool,release=.false.)
+    !$omp end single
 
  endif igot_remote
 
- if (mpi) call recv_while_wait(stack_waiting,xrecvbuf,irequestrecv,&
-          irequestsend,thread_complete,cell_counters,ncomplete_mpi)
+ if (exchange) call recv_while_wait(stack_waiting,cell_counters)
 
- iam_waiting: if (mpi .and. stack_waiting%n > 0) then
-    !$omp do schedule(runtime)
+ iam_waiting: if (exchange .and. stack_waiting%n > 0) then
+    !$omp do schedule(dynamic,ncellchunk)
     over_waiting: do i = 1, stack_waiting%n
        cell = get_cell(stack_waiting,i)
 
@@ -672,7 +684,7 @@ subroutine force(icall,npart,xyzh,vxyzu,fxyzu,divcurlv,divcurlB,Bevol,dBevol,&
 
  endif iam_waiting
 
- call finish_cell_exchange(irequestrecv,xsendbuf,mpitype)
+ if (exchange) call finish_cell_exchange(stack_remote)
 
 !$omp single
  call get_timings(t2,tcpu2)
@@ -683,7 +695,7 @@ subroutine force(icall,npart,xyzh,vxyzu,fxyzu,divcurlv,divcurlB,Bevol,dBevol,&
  if (icreate_sinks > 0) then
     rhomax_thread = 0.
     ipart_rhomax_thread = 0
-    !$omp do schedule(runtime)
+    !$omp do
     over_parts: do i=1,npart
        hi = xyzh(4,i)
 #ifdef IND_TIMESTEPS
@@ -746,9 +758,9 @@ subroutine force(icall,npart,xyzh,vxyzu,fxyzu,divcurlv,divcurlB,Bevol,dBevol,&
     if (use_sinktree) then
        fxyz_ptmass_tree   = reduceall_mpi('+',fxyz_ptmass_tree)
        bin_info(ipertg,:) = reduceall_mpi('+',bin_info(ipertg,:))
-       do i=1,nptmass
-          shortsinktree(1:nptmass,i) = reduceall_mpi("max", shortsinktree(1:nptmass,i))
-       enddo
+       ! one reduction for all sink pairs, rather than one per sink
+       shortsinktree(1:nptmass,1:nptmass) = reshape(reduceall_mpi('max',&
+          reshape(shortsinktree(1:nptmass,1:nptmass),[nptmass*nptmass])),[nptmass,nptmass])
     endif
  endif
 
@@ -757,8 +769,9 @@ subroutine force(icall,npart,xyzh,vxyzu,fxyzu,divcurlv,divcurlB,Bevol,dBevol,&
  ! are dead/inactive, e.g. after sink creation or if all
  ! have moved to a higher ibin; the following step on the
  ! higher ibin will yeild non-zero and modify nbinmax
- ! appropriately
- if (ncheckbin==0) then
+ ! appropriately. With MPI this must be a global check, otherwise
+ ! a task with no active particles would stop nbinmax decreasing
+ if (reduceall_mpi('+',ncheckbin)==0) then
     nbinmaxnew    = nbinmax
  endif
 #endif
@@ -1227,7 +1240,7 @@ subroutine compute_forces(i,iamgasi,iamdusti,xpartveci,hi,hi1,hi21,hi41,gradhi,g
  fgravyi = 0.
  fgravzi = 0.
  if (icooling == 9) then
-    gradP_cool(i) = 0.
+    if (ignoreself) gradP_cool(i) = 0.   ! only on the owner of particle i
     gradpx = 0.
     gradpy = 0.
     gradpz = 0.
@@ -2102,7 +2115,7 @@ subroutine compute_forces(i,iamgasi,iamdusti,xpartveci,hi,hi1,hi21,hi41,gradhi,g
 
  enddo loop_over_neighbours2
 
- if (icooling == 9) gradP_cool(i) = sqrt(gradpx*gradpx + gradpy*gradpy + gradpz*gradpz)
+ if (icooling == 9 .and. ignoreself) gradP_cool(i) = sqrt(gradpx*gradpx + gradpy*gradpy + gradpz*gradpz)
 
 end subroutine compute_forces
 
@@ -2659,9 +2672,17 @@ subroutine compute_cell(cell,listneigh,nneigh,Bevol,xyzh,vxyzu,fxyzu, &
        if (hi == 0.) hi1 = 0
        gradhi = 0.
        gradsofti = 0.
+    endif
+    !--sink indices are the same on every task (used to flag sink pairs in shortsinktree);
+    !  gas indices are only known on the owner (used to exclude self and store gradP)
+    if (iamsinki) then
        i = cell%arr_index(ip)
+    elseif (cell%owner /= id) then
+       i = 0
     else
        i = inodeparts(cell%arr_index(ip))
+    endif
+    if (.not.iamsinki) then
        if (cell%xpartvec(igradhi1,ip) > 0.) then
           gradhi = cell%xpartvec(igradhi1,ip)
        else
@@ -3569,5 +3590,64 @@ subroutine get_drag_terms(tsijtmp,dt,sdrag1,sdrag2,fxi_drag,fyi_drag,fzi_drag,&
     sdrag2 = 0.
  endif
 end subroutine get_drag_terms
+
+!-----------------------------------------------------------------------
+!+
+!  the tasks each particle of an exported cell must be sent to: those with
+!  particles within the kernel radius of either (force uses h_i and h_j),
+!  a subset of the tasks found for the whole cell. Tasks that no particle
+!  reaches are removed from remote_export
+!+
+!-----------------------------------------------------------------------
+subroutine particle_targets(cell,remote_export,ptargets)
+ use neighkdtree, only:get_particle_targets
+ use kernel,      only:radkern
+ type(cellforce), intent(in)    :: cell
+ logical,         intent(inout) :: remote_export(:)
+ logical,         intent(out)   :: ptargets(:,:)
+ integer :: np
+
+ np = cell%npcell
+ ! a fraction more than the kernel radius, so that rounding can never drop a neighbour
+ call get_particle_targets(np,cell%xpartvec(ixi:izi,1:np),radkern*cell%xpartvec(ihi,1:np)*(1. + 1.e-6),&
+                           .true.,remote_export,ptargets)
+
+end subroutine particle_targets
+
+!-----------------------------------------------------------------------
+!+
+!  send a cell to each task with leaves that the dual tree walk paired
+!  with it (listed in remote_leaves), with the owner's local index of
+!  each leaf, in messages of at most maxcellleaves leaves
+!+
+!-----------------------------------------------------------------------
+subroutine send_cell_with_leaves(cell,stack,counters)
+ use io,          only:nprocs
+ use neighkdtree, only:remote_leaves,nremote_leaves,remote_leaf_owner,remote_local_index
+ use mpiderivs,   only:send_cell
+ type(cellforce),  intent(in)    :: cell
+ type(stackforce), intent(inout) :: stack
+ integer,          intent(inout) :: counters(:,:)
+ logical :: target(nprocs)
+ integer :: iproc,k,n,nleaves,leaves(maxcellleaves)
+
+ do iproc = 0,nprocs-1
+    target = .false.
+    target(iproc+1) = .true.
+    nleaves = 0
+    do k = 1,nremote_leaves
+       n = remote_leaves(k)
+       if (remote_leaf_owner(n) /= iproc + 1) cycle
+       nleaves = nleaves + 1
+       leaves(nleaves) = abs(remote_local_index(n))
+       if (nleaves == maxcellleaves) then
+          call send_cell(cell,target,stack,counters,leaves=leaves(1:nleaves))
+          nleaves = 0
+       endif
+    enddo
+    if (nleaves > 0) call send_cell(cell,target,stack,counters,leaves=leaves(1:nleaves))
+ enddo
+
+end subroutine send_cell_with_leaves
 
 end module forces

@@ -19,7 +19,7 @@ module densityforce
 !   mpiderivs, mpimemory, mpiutils, neighkdtree, omputils, options, part,
 !   timestep, timing, viscosity
 !
- use dim,     only:maxdvdx,maxp,maxrhosum,maxdustlarge
+ use dim,     only:maxdvdx,maxp,maxrhosum,maxdustlarge,minpart
  use dim,     only:calculate_density,calculate_divcurlB
  use kdtree,  only:inodeparts,inoderange,im
  use kernel,  only:cnormk,wab0,gradh0,dphidh0,radkern2,cnormk_tilde,wab0_tilde,gradh0_tilde
@@ -129,22 +129,25 @@ subroutine densityiterate(icall,npart,nactive,xyzh,vxyzu,divcurlv,divcurlB,Bevol
  use io,          only:iprint,fatal,iverbose,id,master,real4,warning,error,nprocs
  use neighkdtree, only:leaf_is_active,get_neighbour_list,get_hmaxcell,&
                      listneigh,get_cell_location,set_hmaxcell,sync_hmax_mpi,&
-                     active_leaves,nactive_leaves
+                     active_leaves,nactive_leaves,ncellchunk
  use part,        only:mhd,get_partinfo,iactive,&
                        iphase,igas,idust,iamgas,periodic,all_active,dustfrac
  use mpiutils,    only:reduceall_mpi,barrier_mpi,reduce_mpi,reduceall_mpi
- use mpimemory,   only:reserve_stack,swap_stacks,reset_stacks,write_cell
+ use mpimemory,   only:reserve_stack,swap_stacks,reset_stacks,write_cell,get_cell
  use mpimemory,   only:stack_remote  => dens_stack_1
+ use mpimemory,   only:dens_pool,get_packed_cell,clear_pool
  use mpimemory,   only:stack_waiting => dens_stack_2
  use mpimemory,   only:stack_redo    => dens_stack_3
- use mpiderivs,   only:send_cell,recv_cells,check_send_finished,init_cell_exchange,&
+ use mpidens,     only:nrhosum_pack
+ use mpiderivs,   only:send_cell,recv_cells,init_cell_exchange,record_send_wait,&
                        finish_cell_exchange,recv_while_wait,reset_cell_counters,cell_counters,&
-                       init_send_requests
+                       ndens_calls,ndens_rounds,nimport_part,nimport_useful,nresend_part,nresend_conv
  use timestep,    only:rhomaxnow
  use viscosity,   only:irealvisc
  use io_summary,  only:summary_variable,iosumhup,iosumhdn
- use timing,      only:increment_timer,get_timings,itimer_dens_local,itimer_dens_remote
- use omputils,    only:omp_thread_num,omp_num_threads
+ use timing,      only:increment_timer,get_timings,itimer_dens_local,itimer_dens_remote,&
+                       itimer_dens_lcomp,itimer_dens_rcomp,&
+                       itimer_dens_lsend,itimer_dens_rsend
 
  integer,         intent(in)    :: icall,npart,nactive
  integer(kind=1), intent(in)    :: apr_level(:)
@@ -173,20 +176,21 @@ subroutine densityiterate(icall,npart,nactive,xyzh,vxyzu,divcurlv,divcurlB,Bevol
 
  logical                   :: redo_neighbours
 
- integer                   :: irequestsend(nprocs),irequestrecv(nprocs)
+ type(celldens)            :: cell
 
- type(celldens)            :: cell,xsendbuf,xrecvbuf(nprocs)
- integer                   :: mpitype
-
- integer                   :: n_remote_its,nlocal
- integer                   :: ncomplete_mpi
+ integer                   :: n_remote_its,nlocal,nconv
  real                      :: ntotal
- logical                   :: remote_export(nprocs),do_export,idone(nprocs),thread_complete(omp_num_threads)
+ logical                   :: remote_export(nprocs),do_export
+ logical                   :: ptargets(minpart,nprocs) ! tasks each particle of a cell is sent to
  logical                   :: iterations_finished
+ logical                   :: exchange ! whether cells are exchanged with other MPI tasks
 
  real(kind=4)              :: t1,t2,tcpu1,tcpu2
+ real(kind=4)              :: tc1,tcpuc1,tc2,tcpuc2 ! start and end of the compute loops
 
- if (mpi) then
+ !--the cell exchange is only needed with more than one MPI task
+ exchange = mpi .and. nprocs > 1
+ if (exchange) then
     call reset_stacks
     call reset_cell_counters(cell_counters)
  endif
@@ -235,6 +239,8 @@ subroutine densityiterate(icall,npart,nactive,xyzh,vxyzu,divcurlv,divcurlB,Bevol
  nlocal = 0
 
  rhomax = 0.0
+ ! density sums returned from other tasks: the grad Wtilde copies only with unequal masses
+ nrhosum_pack = merge(maxrhosum,igradhni,use_wtot_sums())
 !$omp parallel default(none) &
 !$omp shared(icall) &
 !$omp shared(leaf_is_active,active_leaves,nactive_leaves) &
@@ -260,7 +266,7 @@ subroutine densityiterate(icall,npart,nactive,xyzh,vxyzu,divcurlv,divcurlB,Bevol
 !$omp shared(iprint) &
 !$omp shared(rad,radprop) &
 !$omp shared(calculate_density) &
-!$omp shared(stack_remote) &
+!$omp shared(stack_remote,dens_pool) &
 !$omp shared(stack_waiting) &
 !$omp shared(stack_redo) &
 !$omp shared(iterations_finished) &
@@ -269,23 +275,16 @@ subroutine densityiterate(icall,npart,nactive,xyzh,vxyzu,divcurlv,divcurlB,Bevol
 !$omp shared(t2) &
 !$omp shared(tcpu1) &
 !$omp shared(tcpu2) &
-!$omp shared(cell_counters) &
-!$omp shared(thread_complete) &
-!$omp shared(ncomplete_mpi) &
+!$omp shared(tc1,tcpuc1,tc2,tcpuc2) &
+!$omp shared(cell_counters,exchange,nimport_part,nimport_useful,nresend_part,nresend_conv) &
 !$omp reduction(+:nlocal) &
 !$omp private(do_export) &
 !$omp private(ntotal) &
-!$omp private(remote_export) &
+!$omp private(remote_export,ptargets) &
 !$omp private(nneigh) &
 !$omp private(cell) &
-!$omp private(converged) &
+!$omp private(converged,nconv) &
 !$omp private(redo_neighbours) &
-!$omp private(irequestsend) &
-!$omp private(xsendbuf) &
-!$omp private(xrecvbuf) &
-!$omp private(irequestrecv) &
-!$omp private(idone) &
-!$omp private(mpitype) &
 !$omp reduction(+:ncalc) &
 !$omp reduction(+:np) &
 !$omp reduction(max:maxneighact) &
@@ -298,16 +297,14 @@ subroutine densityiterate(icall,npart,nactive,xyzh,vxyzu,divcurlv,divcurlB,Bevol
 !$omp reduction(max:rhomax) &
 !$omp private(i,icell,ia)
 
- call init_cell_exchange(xrecvbuf,irequestrecv,thread_complete,ncomplete_mpi,mpitype)
+ if (exchange) call init_cell_exchange(stack_remote)
 
  !$omp single
  call get_timings(t1,tcpu1)
  !$omp end single
 
- !--initialise send requests to null
- call init_send_requests(irequestsend)
 
- !$omp do schedule(runtime)
+ !$omp do schedule(dynamic,ncellchunk)
  over_cells: do ia=1,nactive_leaves
     icell = active_leaves(ia)
 
@@ -326,20 +323,17 @@ subroutine densityiterate(icall,npart,nactive,xyzh,vxyzu,divcurlv,divcurlB,Bevol
     call start_cell(cell,iphase,xyzh,vxyzu,fxyzu,fext,Bevol,rad,apr_level)
     call get_cell_location(icell,cell%xpos,cell%xsizei,cell%rcuti)
     call get_hmaxcell(icell,cell%hmax)
+    !--send each task only the particles that have neighbours there
+    if (do_export) then
+       call particle_targets(cell,remote_export,ptargets)
+       do_export = any(remote_export)
+    endif
 
-    if (mpi) then
-       call recv_cells(stack_remote,xrecvbuf,irequestrecv,cell_counters)
+    if (exchange) then
+       call recv_cells(stack_remote,cell_counters)
        if (do_export) then
-          if (stack_waiting%n > 0) then
-             !--wait for broadcast to complete, continue to receive whilst doing so
-             idone(:) = .false.
-             do while(.not.all(idone))
-                call check_send_finished(irequestsend,idone)
-                call recv_cells(stack_remote,xrecvbuf,irequestrecv,cell_counters)
-             enddo
-          endif
           call reserve_stack(stack_waiting,cell%waiting_index)  ! make a reservation on the stack
-          call send_cell(cell,remote_export,irequestsend,xsendbuf,cell_counters,mpitype)  ! send the cell to remote
+          call send_cell(cell,remote_export,stack_remote,cell_counters,ptargets)  ! send the cell to remote
        endif
     endif
 
@@ -359,18 +353,11 @@ subroutine densityiterate(icall,npart,nactive,xyzh,vxyzu,divcurlv,divcurlB,Bevol
                                       cell_xpos=cell%xpos,cell_xsizei=cell%xsizei,cell_rcuti=cell%rcuti, &
                                       remote_export=remote_export)
 
+                if (any(remote_export)) call particle_targets(cell,remote_export,ptargets)
                 if (any(remote_export)) then
                    do_export = .true.
-                   if (stack_waiting%n > 0) then
-                      !--wait for broadcast to complete, continue to receive whilst doing so
-                      idone(:) = .false.
-                      do while(.not.all(idone))
-                         call check_send_finished(irequestsend,idone)
-                         call recv_cells(stack_remote,xrecvbuf,irequestrecv,cell_counters)
-                      enddo
-                   endif
                    call reserve_stack(stack_waiting,cell%waiting_index)
-                   call send_cell(cell,remote_export,irequestsend,xsendbuf,cell_counters,mpitype)  ! send to remote
+                   call send_cell(cell,remote_export,stack_remote,cell_counters,ptargets)  ! send to remote
                 endif
                 ncalls_neigh = ncalls_neigh + 1
              endif
@@ -393,19 +380,17 @@ subroutine densityiterate(icall,npart,nactive,xyzh,vxyzu,divcurlv,divcurlB,Bevol
     endif
  enddo over_cells
  !$omp enddo
-
- ! if any cells were sent
- if (stack_waiting%n > 0) then
-    idone(:) = .false.
-    do while(.not.all(idone))
-       call check_send_finished(irequestsend,idone)
-       call recv_cells(stack_remote,xrecvbuf,irequestrecv,cell_counters)
-    enddo
+ !$omp single
+ call get_timings(tc2,tcpuc2)
+ if (exchange) then
+    call increment_timer(itimer_dens_lcomp,tc2-t1,tcpuc2-tcpu1)
+    call record_send_wait(itimer_dens_lsend)
  endif
+ !$omp end single
 
- if (mpi) then
-    call recv_while_wait(stack_remote,xrecvbuf,irequestrecv,&
-         irequestsend,thread_complete,cell_counters,ncomplete_mpi)
+
+ if (exchange) then
+    call recv_while_wait(stack_remote,cell_counters)
  endif
 
  !$omp single
@@ -424,7 +409,7 @@ subroutine densityiterate(icall,npart,nactive,xyzh,vxyzu,divcurlv,divcurlB,Bevol
 
  n_remote_its = 0
  iterations_finished = .false.
- if (.not.mpi) iterations_finished = .true.
+ if (.not.exchange) iterations_finished = .true.
  !$omp end single
  !$omp barrier
 
@@ -436,74 +421,75 @@ subroutine densityiterate(icall,npart,nactive,xyzh,vxyzu,divcurlv,divcurlB,Bevol
     call reset_cell_counters(cell_counters)
     !$omp barrier
 
-    igot_remote: if (stack_remote%n > 0) then
-       !$omp do schedule(runtime)
-       over_remote: do i = 1,stack_remote%n
-          cell = stack_remote%cells(i)
+    igot_remote: if (dens_pool%n > 0) then
+       !$omp single
+       call get_timings(tc1,tcpuc1)
+       !$omp end single
+       !$omp do schedule(dynamic,ncellchunk)
+       over_remote: do i = 1,dens_pool%n
+          call get_packed_cell(dens_pool,i,cell)
 
           ! icell is unused (-1 here)
           call get_neighbour_list(-1,listneigh,nneigh,xyzh,xyzcache,isizecellcache,getj=.false., &
                                   cell_xpos=cell%xpos,cell_xsizei=cell%xsizei,cell_rcuti=cell%rcuti)
 
           call compute_cell(cell,listneigh,nneigh,getdv,getdB,Bevol,xyzh,vxyzu,fxyzu,fext,xyzcache,rad,apr_level)
+          !$omp atomic
+          nimport_part = nimport_part + cell%npcell
+          !$omp atomic
+          nimport_useful = nimport_useful + count(cell%nneigh(1:cell%npcell) > 0)
           remote_export = .false.
           remote_export(cell%owner+1) = .true. ! use remote_export array to send back to the owner
 
-          ! communication happened while computing contributions to remote cells
-          idone(:) = .false.
-          do while(.not.all(idone))
-             call check_send_finished(irequestsend,idone)
-             call recv_cells(stack_waiting,xrecvbuf,irequestrecv,cell_counters)
-          enddo
 
-          call send_cell(cell,remote_export,irequestsend,xsendbuf,cell_counters,mpitype) ! send the cell back to owner
+          call send_cell(cell,remote_export,stack_waiting,cell_counters) ! send the cell back to owner
        enddo over_remote
        !$omp enddo
-
        !$omp single
-       stack_remote%n = 0
+       call get_timings(tc2,tcpuc2)
+       call increment_timer(itimer_dens_rcomp,tc2-tc1,tcpuc2-tcpuc1)
+       call record_send_wait(itimer_dens_rsend)
        !$omp end single
 
-       idone(:) = .false.
-       do while(.not.all(idone))
-          call check_send_finished(irequestsend,idone)
-          call recv_cells(stack_waiting,xrecvbuf,irequestrecv,cell_counters)
-       enddo
+       !$omp single
+       call clear_pool(dens_pool,release=.false.)
+       !$omp end single
+
     endif igot_remote
 
-    if (mpi) call recv_while_wait(stack_waiting,xrecvbuf,irequestrecv,&
-             irequestsend,thread_complete,cell_counters,ncomplete_mpi)
+    if (exchange) call recv_while_wait(stack_waiting,cell_counters)
     call reset_cell_counters(cell_counters)
     !$omp barrier
 
-    iam_waiting: if (mpi .and. stack_waiting%n > 0) then
-       !$omp do schedule(runtime)
+    iam_waiting: if (exchange .and. stack_waiting%n > 0) then
+       !$omp do schedule(dynamic,ncellchunk)
        over_waiting: do i = 1, stack_waiting%n
-          cell = stack_waiting%cells(i)
+          cell = get_cell(stack_waiting,i)
 
           if (calculate_density) then
-             call finish_cell(cell,converged)
+             call finish_cell(cell,converged,nconv)
              call compute_hmax(cell,redo_neighbours)
+             if (icall == 0) converged = .true.  ! one pass only, as for local cells
           else
              converged = .true.
           endif
 
           ! check for incoming cells (if converged, this may not be checked until enxt cell)
-          call recv_cells(stack_remote,xrecvbuf,irequestrecv,cell_counters)
+          call recv_cells(stack_remote,cell_counters)
 
           if (.not. converged) then
              call set_hmaxcell(cell%icell,cell%hmax)
              call get_neighbour_list(-1,listneigh,nneigh,xyzh,xyzcache,isizecellcache,getj=.false., &
                                     cell_xpos=cell%xpos,cell_xsizei=cell%xsizei,cell_rcuti=cell%rcuti, &
                                     remote_export=remote_export)
+             if (any(remote_export)) call particle_targets(cell,remote_export,ptargets)
 
-             idone(:) = .false.
-             do while(.not.all(idone))
-                call check_send_finished(irequestsend,idone)
-                call recv_cells(stack_remote,xrecvbuf,irequestrecv,cell_counters)
-             enddo
              call reserve_stack(stack_redo,cell%waiting_index)
-             call send_cell(cell,remote_export,irequestsend,xsendbuf,cell_counters,mpitype) ! send the cell to remote
+             call send_cell(cell,remote_export,stack_remote,cell_counters,ptargets) ! send the cell to remote
+             !$omp atomic
+             nresend_part = nresend_part + cell%npcell
+             !$omp atomic
+             nresend_conv = nresend_conv + nconv
 
              call compute_cell(cell,listneigh,nneigh,getdv,getdB,Bevol,xyzh,vxyzu,fxyzu,fext,xyzcache,rad,apr_level)
              call write_cell(stack_redo,cell)
@@ -520,15 +506,9 @@ subroutine densityiterate(icall,npart,nactive,xyzh,vxyzu,divcurlv,divcurlB,Bevol
        stack_waiting%n = 0
        !$omp end single
 
-       idone(:) = .false.
-       do while(.not.all(idone))
-          call check_send_finished(irequestsend,idone)
-          call recv_cells(stack_remote,xrecvbuf,irequestrecv,cell_counters)
-       enddo
     endif iam_waiting
 
-    if (mpi) call recv_while_wait(stack_remote,xrecvbuf,irequestrecv,&
-             irequestsend,thread_complete,cell_counters,ncomplete_mpi)
+    if (exchange) call recv_while_wait(stack_remote,cell_counters)
 
     !$omp single
     if (reduceall_mpi('max',stack_redo%n) > 0) then
@@ -547,11 +527,16 @@ subroutine densityiterate(icall,npart,nactive,xyzh,vxyzu,divcurlv,divcurlB,Bevol
  call increment_timer(itimer_dens_remote,t2-t1,tcpu2-tcpu1)
  !$omp end single
 
- if (mpi) call finish_cell_exchange(irequestrecv,xsendbuf,mpitype)
+ if (exchange) call finish_cell_exchange(stack_remote)
 
  !$omp end parallel
 
- if (mpi) call sync_hmax_mpi
+ if (exchange) then
+    ndens_calls  = ndens_calls + 1
+    ndens_rounds = ndens_rounds + n_remote_its
+ endif
+
+ if (exchange) call sync_hmax_mpi
 
  if (calculate_density) then
     !--reduce values
@@ -1422,7 +1407,12 @@ pure subroutine compute_cell(cell,listneigh,nneigh,getdv,getdB,Bevol,xyzh,vxyzu,
  realviscosity = (irealvisc > 0)
 
  over_parts: do i = 1,cell%npcell
-    lli = inodeparts(cell%arr_index(i))
+    !--particle index is only known on the owner (used only to exclude self)
+    if (cell%owner == id) then
+       lli = inodeparts(cell%arr_index(i))
+    else
+       lli = 0
+    endif
     ! note: only active particles have been sent here
     if (maxphase==maxp) then
        call get_partinfo(cell%iphase(i),iactivei,iamgasi,iamdusti,iamtypei)
@@ -1572,7 +1562,7 @@ end subroutine start_cell
 !--------------------------------------------------------------------------
 !+
 !--------------------------------------------------------------------------
-subroutine finish_cell(cell,cell_converged)
+subroutine finish_cell(cell,cell_converged,nconverged)
  use dim,      only:use_apr
  use io,       only:iprint,fatal
  use part,     only:get_partinfo,iamgas,maxphase,massoftype,igas,aprmassoftype,nh
@@ -1580,6 +1570,7 @@ subroutine finish_cell(cell,cell_converged)
 
  type(celldens), intent(inout) :: cell
  logical,        intent(out)   :: cell_converged
+ integer,        intent(out), optional :: nconverged ! number of particles converged
  real                           :: rhosum(maxrhosum)
  real                           :: dhdni,omegat
  real                           :: rhoi,ni
@@ -1591,6 +1582,7 @@ subroutine finish_cell(cell,cell_converged)
 
  cell%nits = cell%nits + 1
  cell_converged = .true.
+ if (present(nconverged)) nconverged = 0
  over_parts: do i = 1,cell%npcell
     hi = cell%h(i)
     hi_old = cell%h_old(i)
@@ -1630,6 +1622,7 @@ subroutine finish_cell(cell,cell_converged)
 
     converged = ((abs(hnew-hi)/hi_old) < tolh .and. omegat > 0. .and. hi > 0.)
     if (cell_converged) cell_converged = converged
+    if (present(nconverged) .and. converged) nconverged = nconverged + 1
 
     if ((.not. converged) .and. (cell%nits >= maxdensits)) then
        xyzh(1) = cell%xpartvec(ixi,i)
@@ -1972,5 +1965,28 @@ subroutine get_density_at_pos(x,rho,itype)
  enddo loop_over_neigh
 
 end subroutine get_density_at_pos
+
+!-----------------------------------------------------------------------
+!+
+!  the tasks each particle of an exported cell must be sent to: those with
+!  particles within its own kernel radius (density uses h_i only), a subset
+!  of the tasks found for the whole cell. Tasks that no particle reaches
+!  are removed from remote_export
+!+
+!-----------------------------------------------------------------------
+subroutine particle_targets(cell,remote_export,ptargets)
+ use neighkdtree, only:get_particle_targets
+ use kernel,      only:radkern
+ type(celldens), intent(in)    :: cell
+ logical,        intent(inout) :: remote_export(:)
+ logical,        intent(out)   :: ptargets(:,:)
+ integer :: np
+
+ np = cell%npcell
+ ! a fraction more than the kernel radius, so that rounding can never drop a neighbour
+ call get_particle_targets(np,cell%xpartvec(ixi:izi,1:np),radkern*cell%h(1:np)*(1. + 1.e-6),&
+                           .false.,remote_export,ptargets)
+
+end subroutine particle_targets
 
 end module densityforce
