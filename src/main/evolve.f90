@@ -39,8 +39,7 @@ module evolve
  logical         :: abortrun_bdy,use_global_dt
  integer(kind=8) :: nmovedtot,nalivetot
  integer(kind=1) :: nbinmaxprev
- ! HPR
- integer         :: hpr_csv_unit = 0
+
 
 contains
 
@@ -116,10 +115,10 @@ subroutine evol(infile,logfile,evfile,dumpfile,flag)
  use timestep_ind,     only:nactive
  use growth_coala,     only:get_growth_rate_coala
  ! HPR
- use part,                       only: massoftype
+ use part,                       only: massoftype, nptmass, xyzmh_ptmass, vxyz_ptmass
  use deriv,                      only:get_derivs_global
  use options,                    only:use_hpr
- use halted_pendulum_relaxation, only:hpr_check_and_apply, hpr_init
+ use halted_pendulum_relaxation, only:hpr_check_and_apply_with_sinks, hpr_init, hpr_init_csv
  use energies,                   only:compute_energies,etot,angtot,totmom,mdust,mtot
  use checkconserved,             only:etot_in,angtot_in,totmom_in,mdust_in,mtot_in
  use io,                         only:id,master,iprint
@@ -131,50 +130,6 @@ subroutine evol(infile,logfile,evfile,dumpfile,flag)
  logical         :: do_radiation_update,abortrun
  ! HPR
  logical         :: hpr_applied
- logical         :: hpr_csv_exists
- logical, save   :: first_call = .true.
-
- ! HPR
- if (id == master) then
-   if (first_call) then
-      if (use_hpr) then
-         write(iprint,"(a)") ' halted-pendulum relaxation hook enabled; diagnostics: hpr_diagnostics.csv'
-      else
-         write(iprint,"(a)") ' halted-pendulum relaxation OFF (use_hpr=F); diagnostics only: hpr_diagnostics.csv'
-      endif
-      first_call = .false.
-   endif
-
-   if (hpr_csv_unit == 0) then
-      inquire(file="hpr_diagnostics.csv",exist=hpr_csv_exists)
-      if (hpr_csv_exists) then
-         open(newunit=hpr_csv_unit,file="hpr_diagnostics.csv",status="old",position="append",action="write")
-         write(iprint,"(a)") ' hpr_diagnostics.csv already exists: appending to i'
-      else
-         open(newunit=hpr_csv_unit,file="hpr_diagnostics.csv",status="replace",action="write")
-         write(hpr_csv_unit,"(a)") &
-            "time,time_seconds,time_years,npart,ekin_corot,ekin_total,"// &
-            "omega,omega_spin1_x,omega_spin1_y,omega_spin1_z,"// &
-            "omega_spin2_x,omega_spin2_y,omega_spin2_z,"// &
-            "com_x,com_y,com_z,vcom_x,vcom_y,vcom_z,"// &
-            "inertia_xx,inertia_xy,inertia_xz,inertia_yx,inertia_yy,inertia_yz,inertia_zx,inertia_zy,inertia_zz,"// &
-            "principle_1,principle_2,principle_3,evector_x,evector_y,evector_z,rmax,"// &
-            "l1_x,l1_y,l1_z,l1_projection,star1_mass,star2_mass,star1_com_x,star1_com_y,star1_com_z,"// &
-            "star2_com_x,star2_com_y,star2_com_z,separation_x,separation_y,separation_z,"// &
-            "separation_norm,fit_aa,fit_bb,fit_cc,tmax,"// &
-            "buffer_size,omega_samples,hpr_napplied,applied,"// &
-            "L_spin1_x,L_spin1_y,L_spin1_z," // &
-            "L_spin2_x,L_spin2_y,L_spin2_z," // &
-            "L_spin_system_x,L_spin_system_y,L_spin_system_z," // &
-            "L_total_x,L_total_y,L_total_z," // &
-            "vcom1_x,vcom1_y,vcom1_z," // &
-            "vcom2_x,vcom2_y,vcom2_z," // &
-            "q1_xx,q1_yy,q1_zz,q1_xy,q1_xz,q1_yz," // &
-            "q2_xx,q2_yy,q2_zz,q2_xy,q2_xz,q2_yz," // &
-            "etot,etherm"
-         endif
-      endif
- endif
 
  ! the following isrequired because evol is called multiple times in AMUSE... -SR
  if (.not. initialized) call evol_init(time,dtmax,rhomaxnow,dt)
@@ -200,7 +155,7 @@ subroutine evol(infile,logfile,evfile,dumpfile,flag)
     !
     call step(npart,nactive,time,dt,dtextforce,dtnew)
     ! HPR
-    call hpr_check_and_apply(npart, xyzh, vxyzu, massoftype, time+dt, hpr_applied, hpr_csv_unit)
+    call hpr_check_and_apply_with_sinks(npart, xyzh, vxyzu, massoftype, time+dt, hpr_applied)
     if (hpr_applied) then
       call get_derivs_global()
       call compute_energies(time+dt)

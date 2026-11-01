@@ -17,7 +17,9 @@ module halted_pendulum_relaxation
 
    implicit none
    public :: hpr_check_and_apply
+   public :: hpr_check_and_apply_with_sinks
    public :: hpr_init
+   public :: hpr_init_csv
 
 
    ! ring buffer of (time, ekin_corot) pairs for polynomial fit
@@ -39,6 +41,8 @@ module halted_pendulum_relaxation
    real, save :: evector_old(3) = (/1.,0.,0./)
    logical, save :: hpr_first_call = .true.
    logical, save :: hpr_initialized = .false.
+   integer, save :: hpr_csv_unit = 0
+   logical, save :: hpr_csv_initialized = .false.
    private
 
 contains
@@ -79,7 +83,68 @@ contains
 
    end subroutine hpr_init
 
-   subroutine hpr_check_and_apply(npart,xyzh,vxyzu,massoftype,t,applied,csv_unit)
+!
+! Initialize CSV file for HPR diagnostics
+!
+   subroutine hpr_init_csv()
+      use io, only:id,master,iprint
+      use options, only:use_hpr
+      integer :: ierr
+      logical :: hpr_csv_exists
+
+      if (hpr_csv_initialized) return
+
+      if (id == master) then
+         if (use_hpr) then
+            write(iprint,"(a)") ' halted-pendulum relaxation hook enabled; diagnostics: hpr_diagnostics.csv'
+         else
+            write(iprint,"(a)") ' halted-pendulum relaxation OFF (use_hpr=F); diagnostics only: hpr_diagnostics.csv'
+         endif
+
+         if (hpr_csv_unit == 0) then
+            inquire(file="hpr_diagnostics.csv",exist=hpr_csv_exists)
+            if (hpr_csv_exists) then
+               open(newunit=hpr_csv_unit,file="hpr_diagnostics.csv",status="old",position="append",action="write",iostat=ierr)
+               if (ierr == 0) then
+                  write(iprint,"(a)") ' hpr_diagnostics.csv already exists: appending to it'
+               else
+                  write(iprint,"(a)") ' ERROR: could not open hpr_diagnostics.csv for appending'
+               endif
+            else
+               open(newunit=hpr_csv_unit,file="hpr_diagnostics.csv",status="replace",action="write",iostat=ierr)
+               if (ierr == 0) then
+                  write(hpr_csv_unit,"(a)") &
+                     "time,time_seconds,time_years,npart,ekin_corot,ekin_total,"// &
+                     "omega,omega_spin1_x,omega_spin1_y,omega_spin1_z,"// &
+                     "omega_spin2_x,omega_spin2_y,omega_spin2_z,"// &
+                     "com_x,com_y,com_z,vcom_x,vcom_y,vcom_z,"// &
+                     "inertia_xx,inertia_xy,inertia_xz,inertia_yx,inertia_yy,inertia_yz,inertia_zx,inertia_zy,inertia_zz,"// &
+                     "principle_1,principle_2,principle_3,evector_x,evector_y,evector_z,rmax,"// &
+                     "l1_x,l1_y,l1_z,l1_projection,star1_mass,star2_mass,star1_com_x,star1_com_y,star1_com_z,"// &
+                     "star2_com_x,star2_com_y,star2_com_z,separation_x,separation_y,separation_z,"// &
+                     "separation_norm,fit_aa,fit_bb,fit_cc,tmax,"// &
+                     "buffer_size,omega_samples,hpr_napplied,applied,"// &
+                     "L_spin1_x,L_spin1_y,L_spin1_z," // &
+                     "L_spin2_x,L_spin2_y,L_spin2_z," // &
+                     "L_spin_system_x,L_spin_system_y,L_spin_system_z," // &
+                     "L_total_x,L_total_y,L_total_z," // &
+                     "vcom1_x,vcom1_y,vcom1_z," // &
+                     "vcom2_x,vcom2_y,vcom2_z," // &
+                     "q1_xx,q1_yy,q1_zz,q1_xy,q1_xz,q1_yz," // &
+                     "q2_xx,q2_yy,q2_zz,q2_xy,q2_xz,q2_yz," // &
+                     "etot,etherm"
+               else
+                  write(iprint,"(a)") ' ERROR: could not create hpr_diagnostics.csv'
+               endif
+            endif
+         endif
+      endif
+
+      hpr_csv_initialized = .true.
+
+   end subroutine hpr_init_csv
+
+   subroutine hpr_check_and_apply(npart,xyzh,vxyzu,massoftype,t,applied,csv_unit,nptmass,xyzmh_ptmass,vxyz_ptmass)
       use io,                        only:id,master,iprint
       use options,                   only:use_hpr,hpr_nfit,hpr_ekin_tol
       use part,                      only:igas
@@ -97,6 +162,8 @@ contains
       real,    intent(in)    :: t
       logical, intent(out)   :: applied
       integer, intent(in)    :: csv_unit
+      integer, intent(in), optional :: nptmass
+      real,    intent(in), optional :: xyzmh_ptmass(:,:), vxyz_ptmass(:,:)
 
       real :: com(3),vcom(3)
       real :: inertia(3,3),principle(3),evectors(3,3),rmax
@@ -138,8 +205,12 @@ contains
       particlemass   = massoftype(igas)
       density_cutoff = 0.
 
-      ! system center of mass
-      call get_centreofmass(com, vcom, npart, xyzh, vxyzu)
+      ! system center of mass - with sink particles if present
+      if (present(nptmass) .and. present(xyzmh_ptmass) .and. present(vxyz_ptmass)) then
+         call get_centreofmass(com, vcom, npart, xyzh, vxyzu, nptmass, xyzmh_ptmass, vxyz_ptmass)
+      else
+         call get_centreofmass(com, vcom, npart, xyzh, vxyzu)
+      endif
 
       ! Calculate the tensor inertia and evectors
       call get_momentofinertia(xyzh, vxyzu, com, vcom, npart, density_cutoff, particlemass,&
@@ -154,20 +225,41 @@ contains
       call L1_point(2, xyzh, particlemass, npart, evector_old, com, hpr_omega_current, rmax, L1_projection, L1)
 
       ! Split into the two stars using the L1 point just found.
-      call split_by_axis(npart, xyzh, massoftype, evector_old, L1_projection, com1, m1, com2, m2)
+      if (present(nptmass) .and. present(xyzmh_ptmass)) then
+         call split_by_axis(npart, xyzh, massoftype, evector_old, L1_projection, com1, m1, com2, m2, nptmass, xyzmh_ptmass)
+      else
+         call split_by_axis(npart, xyzh, massoftype, evector_old, L1_projection, com1, m1, com2, m2)
+      endif
 
-      call get_quadrupole_moments(npart, xyzh, massoftype, evector_old, L1_projection, com1, com2, q1, q2)
+      if (present(nptmass) .and. present(xyzmh_ptmass)) then
+         call get_quadrupole_moments(npart, xyzh, massoftype, evector_old, L1_projection, com1, com2, q1, q2, nptmass, xyzmh_ptmass)
+      else
+         call get_quadrupole_moments(npart, xyzh, massoftype, evector_old, L1_projection, com1, com2, q1, q2)
+      endif
       sep = com1 - com2
       sep_norm = sqrt(sum(sep**2))
 
       call update_omega_estimate(sep(1),sep(2),t)
       omega_vec = (/0.,0.,hpr_omega_current/)
-      call get_spin_angular_velocities(npart,xyzh,vxyzu,massoftype,evector_old, &
-         L1_projection,com1,m1,com2,m2,com,vcom, &
-         omega_spin1,omega_spin2,L_spin1,L_spin2, &
-         vcom1,vcom2,L_spin_system,L_total)
+      if (present(nptmass) .and. present(xyzmh_ptmass) .and. present(vxyz_ptmass)) then
+         call get_spin_angular_velocities(npart,xyzh,vxyzu,massoftype,evector_old, &
+            L1_projection,com1,m1,com2,m2,com,vcom, &
+            omega_spin1,omega_spin2,L_spin1,L_spin2, &
+            vcom1,vcom2,L_spin_system,L_total,nptmass,xyzmh_ptmass,vxyz_ptmass)
+      else
+         call get_spin_angular_velocities(npart,xyzh,vxyzu,massoftype,evector_old, &
+            L1_projection,com1,m1,com2,m2,com,vcom, &
+            omega_spin1,omega_spin2,L_spin1,L_spin2, &
+            vcom1,vcom2,L_spin_system,L_total)
+      endif
 
-      call get_kinetic_energies(npart,xyzh,vxyzu,massoftype,omega_vec,com,ekin_corot,ekin_total)
+      if (present(nptmass) .and. present(xyzmh_ptmass) .and. present(vxyz_ptmass)) then
+         call get_kinetic_energies(npart,xyzh,vxyzu,massoftype,omega_vec,com, &
+                                    ekin_corot,ekin_total,nptmass,xyzmh_ptmass,vxyz_ptmass)
+      else
+         call get_kinetic_energies(npart,xyzh,vxyzu,massoftype,omega_vec,com, &
+                                    ekin_corot,ekin_total)
+      endif
       call compute_energies(t)
 
       call push_buffer(t,ekin_corot)
@@ -208,6 +300,22 @@ contains
       endif
 
    end subroutine hpr_check_and_apply
+
+   ! Wrapper for backward compatibility
+   subroutine hpr_check_and_apply_with_sinks(npart,xyzh,vxyzu,massoftype,t,applied)
+      use part, only:nptmass,xyzmh_ptmass,vxyz_ptmass
+      integer, intent(in)    :: npart
+      real,    intent(inout) :: xyzh(:,:)
+      real,    intent(inout) :: vxyzu(:,:)
+      real,    intent(in)    :: massoftype(:)
+      real,    intent(in)    :: t
+      logical, intent(out)   :: applied
+      
+      ! Initialize CSV file if needed
+      if (.not. hpr_csv_initialized) call hpr_init_csv()
+      
+      call hpr_check_and_apply(npart,xyzh,vxyzu,massoftype,t,applied,hpr_csv_unit,nptmass,xyzmh_ptmass,vxyz_ptmass)
+   end subroutine hpr_check_and_apply_with_sinks
 
 !----------------------------------------------------------------
 !+
@@ -313,7 +421,8 @@ contains
 !  summed over all live particles, reduced across MPI ranks.
 !+
 !----------------------------------------------------------------
-   subroutine get_kinetic_energies(npart,xyzh,vxyzu,massoftype,omega_vec,com_in,ekin_corot,ekin_total)
+   subroutine get_kinetic_energies(npart,xyzh,vxyzu,massoftype,omega_vec,com_in, &
+                                     ekin_corot,ekin_total,nptmass,xyzmh_ptmass,vxyz_ptmass)
       use part,        only:iamtype,iphase,isdead_or_accreted
       use mpiutils,    only:reduceall_mpi
       use vectorutils, only:cross_product3D
@@ -322,6 +431,8 @@ contains
       real,    intent(in)  :: omega_vec(3)
       real,    intent(in)  :: com_in(3)
       real,    intent(out) :: ekin_corot,ekin_total
+      integer, intent(in), optional :: nptmass
+      real,    intent(in), optional :: xyzmh_ptmass(:,:), vxyz_ptmass(:,:)
       integer :: i
       real :: mi,r(3),v_lab(3),v_orb(3),v_res(3)
 
@@ -337,6 +448,22 @@ contains
          ekin_corot = ekin_corot + 0.5*mi*sum(v_res**2)
          ekin_total = ekin_total + 0.5*mi*sum(v_lab**2)
       enddo
+      
+      ! Add sink particles if present
+      if (present(nptmass) .and. present(xyzmh_ptmass) .and. present(vxyz_ptmass)) then
+         do i=1,nptmass
+            mi = xyzmh_ptmass(4,i)
+            if (mi > 0.) then
+               r = xyzmh_ptmass(1:3,i) - com_in
+               v_lab = vxyz_ptmass(1:3,i)
+               call cross_product3D(omega_vec,r,v_orb)
+               v_res = v_lab - v_orb
+               ekin_corot = ekin_corot + 0.5*mi*sum(v_res**2)
+               ekin_total = ekin_total + 0.5*mi*sum(v_lab**2)
+            endif
+         enddo
+      endif
+      
       ekin_corot = reduceall_mpi('+',ekin_corot)
       ekin_total = reduceall_mpi('+',ekin_total)
 
@@ -395,13 +522,15 @@ contains
 !  skips dead/accreted particles.
 !+
 !----------------------------------------------------------------
-   subroutine split_by_axis(npart,xyzh,massoftype,axis,threshold,com1,m1,com2,m2)
+   subroutine split_by_axis(npart,xyzh,massoftype,axis,threshold,com1,m1,com2,m2,nptmass,xyzmh_ptmass)
       use part,     only:iamtype,iphase,isdead_or_accreted
       use mpiutils, only:reduceall_mpi
       integer, intent(in)  :: npart
       real,    intent(in)  :: xyzh(:,:),massoftype(:)
       real,    intent(in)  :: axis(3),threshold
       real,    intent(out) :: com1(3),m1,com2(3),m2
+      integer, intent(in), optional :: nptmass
+      real,    intent(in), optional :: xyzmh_ptmass(:,:)
       integer :: i,k
       real :: mi
 
@@ -418,6 +547,23 @@ contains
             m2   = m2 + mi
          endif
       enddo
+      
+      ! Add sink particles if present
+      if (present(nptmass) .and. present(xyzmh_ptmass)) then
+         do i=1,nptmass
+            mi = xyzmh_ptmass(4,i)
+            if (mi > 0.) then
+               if (dot_product(xyzmh_ptmass(1:3,i),axis) >= threshold) then
+                  com1 = com1 + mi*xyzmh_ptmass(1:3,i)
+                  m1   = m1 + mi
+               else
+                  com2 = com2 + mi*xyzmh_ptmass(1:3,i)
+                  m2   = m2 + mi
+               endif
+            endif
+         enddo
+      endif
+      
       ! reduceall_mpi is only used here as a scalar reduction elsewhere
       ! in this file (see get_kinetic_energies) -- reduce component-wise
       ! rather than assume the interface is overloaded for rank-1 args

@@ -865,7 +865,7 @@ contains
    subroutine get_spin_angular_velocities(npart,xyzh,vxyzu,massoftype,axis, &
       threshold,com1,m1,com2,m2,com_total,vcom_total, &
       omega_spin1,omega_spin2,L_spin1,L_spin2, &
-      vcom1,vcom2,L_spin_system,L_total)
+      vcom1,vcom2,L_spin_system,L_total,nptmass,xyzmh_ptmass,vxyz_ptmass)
       use part,        only:iamtype,iphase,isdead_or_accreted
       use mpiutils,    only:reduceall_mpi
       use vectorutils, only:cross_product3D,matrixinvert3D
@@ -878,6 +878,8 @@ contains
       real,    intent(out) :: L_spin1(3),L_spin2(3)
       real,    intent(out) :: vcom1(3),vcom2(3)
       real,    intent(out) :: L_spin_system(3),L_total(3)
+      integer, intent(in), optional :: nptmass
+      real,    intent(in), optional :: xyzmh_ptmass(:,:), vxyz_ptmass(:,:)
       integer :: i,j,k
       real    :: mi,dr(3),L_tmp(3),drc(3),dvc(3)
       real    :: I1(3,3),I2(3,3),Iinv(3,3)
@@ -918,6 +920,38 @@ contains
             I2_send(2,3) = I2_send(2,3) - mi*dr(2)*dr(3)
          endif
       enddo
+      
+      ! Add sink particles if present
+      if (present(nptmass) .and. present(xyzmh_ptmass) .and. present(vxyz_ptmass)) then
+         do i=1,nptmass
+            mi = xyzmh_ptmass(4,i)
+            if (mi > 0.) then
+               if (dot_product(xyzmh_ptmass(1:3,i),axis) >= threshold) then
+                  dr = xyzmh_ptmass(1:3,i) - com1
+                  call cross_product3D(dr, vxyz_ptmass(1:3,i), L_tmp)
+                  L1_send = L1_send + mi*L_tmp
+                  v1_send = v1_send + mi*vxyz_ptmass(1:3,i)
+                  I1_send(1,1) = I1_send(1,1) + mi*(dr(2)**2 + dr(3)**2)
+                  I1_send(2,2) = I1_send(2,2) + mi*(dr(1)**2 + dr(3)**2)
+                  I1_send(3,3) = I1_send(3,3) + mi*(dr(1)**2 + dr(2)**2)
+                  I1_send(1,2) = I1_send(1,2) - mi*dr(1)*dr(2)
+                  I1_send(1,3) = I1_send(1,3) - mi*dr(1)*dr(3)
+                  I1_send(2,3) = I1_send(2,3) - mi*dr(2)*dr(3)
+               else
+                  dr = xyzmh_ptmass(1:3,i) - com2
+                  call cross_product3D(dr, vxyz_ptmass(1:3,i), L_tmp)
+                  L2_send = L2_send + mi*L_tmp
+                  v2_send = v2_send + mi*vxyz_ptmass(1:3,i)
+                  I2_send(1,1) = I2_send(1,1) + mi*(dr(2)**2 + dr(3)**2)
+                  I2_send(2,2) = I2_send(2,2) + mi*(dr(1)**2 + dr(3)**2)
+                  I2_send(3,3) = I2_send(3,3) + mi*(dr(1)**2 + dr(2)**2)
+                  I2_send(1,2) = I2_send(1,2) - mi*dr(1)*dr(2)
+                  I2_send(1,3) = I2_send(1,3) - mi*dr(1)*dr(3)
+                  I2_send(2,3) = I2_send(2,3) - mi*dr(2)*dr(3)
+               endif
+            endif
+         enddo
+      endif
 
       ! MPI reduction for spin angular momenta and COM velocities
       do k=1,3
@@ -984,7 +1018,7 @@ contains
 !  Calculate quadrupole moments for both stars
 !+
 !----------------------------------------------------------------
-   subroutine get_quadrupole_moments(npart,xyzh,massoftype,axis,threshold,com1,com2,q1,q2)
+   subroutine get_quadrupole_moments(npart,xyzh,massoftype,axis,threshold,com1,com2,q1,q2,nptmass,xyzmh_ptmass)
       use part,     only:iamtype,iphase,isdead_or_accreted
       use mpiutils, only:reduceall_mpi
       integer, intent(in)  :: npart
@@ -992,6 +1026,8 @@ contains
       real,    intent(in)  :: axis(3),threshold
       real,    intent(in)  :: com1(3),com2(3)       ! Centers of mass
       real,    intent(out) :: q1(6),q2(6)           ! Quadrupole tensors (xx,yy,zz,xy,xz,yz)
+      integer, intent(in), optional :: nptmass
+      real,    intent(in), optional :: xyzmh_ptmass(:,:)
       integer :: i, k
       real    :: mi, dx(3), r2, qloc(6)
       real    :: q1_send(6),q2_send(6)               ! Local accumulation buffers
@@ -1023,6 +1059,35 @@ contains
             q2_send = q2_send + qloc
          endif
       enddo
+      
+      ! Add sink particles if present
+      if (present(nptmass) .and. present(xyzmh_ptmass)) then
+         do i=1,nptmass
+            mi = xyzmh_ptmass(4,i)
+            if (mi > 0.) then
+               ! Determine which star this sink particle belongs to
+               if (dot_product(xyzmh_ptmass(1:3,i),axis) >= threshold) then
+                  dx = xyzmh_ptmass(1:3,i) - com1
+               else
+                  dx = xyzmh_ptmass(1:3,i) - com2
+               endif
+               
+               r2 = sum(dx**2)
+               qloc(1) = mi * (3.*dx(1)*dx(1) - r2)
+               qloc(2) = mi * (3.*dx(2)*dx(2) - r2)
+               qloc(3) = mi * (3.*dx(3)*dx(3) - r2)
+               qloc(4) = mi * 3.*dx(1)*dx(2)
+               qloc(5) = mi * 3.*dx(1)*dx(3)
+               qloc(6) = mi * 3.*dx(2)*dx(3)
+               
+               if (dot_product(xyzmh_ptmass(1:3,i),axis) >= threshold) then
+                  q1_send = q1_send + qloc
+               else
+                  q2_send = q2_send + qloc
+               endif
+            endif
+         enddo
+      endif
 
       ! MPI reduction for each component
       do k=1,6

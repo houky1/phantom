@@ -46,6 +46,21 @@ module halted_pendulum_tools
    ! subroutines (re-exported from binary_tools)
    !
    public :: get_momentofinertia, correct_sign_evector, L1_point, get_spin_angular_velocities, get_quadrupole_moments
+   
+   ! Interface for HPR with sink support
+   interface
+      subroutine hpr_check_and_apply_with_sinks(npart,xyzh,vxyzu,massoftype,t,applied)
+         integer, intent(in)    :: npart
+         real,    intent(inout) :: xyzh(:,:)
+         real,    intent(inout) :: vxyzu(:,:)
+         real,    intent(in)    :: massoftype(:)
+         real,    intent(in)    :: t
+         logical, intent(out)   :: applied
+      end subroutine hpr_check_and_apply_with_sinks
+      subroutine hpr_init_csv()
+      end subroutine hpr_init_csv
+   end interface
+   public :: hpr_check_and_apply_with_sinks, hpr_init_csv
    private
 
 end module halted_pendulum_tools
